@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audio zu Text</title>
+<meta name="description" content="Audio- und Videodateien im Browser in Text und Untertitel umwandeln. Die Dateien verlassen nie das Gerät.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css?v=__BUILD__">
+<!-- Schaltet Mehrkern-Rechnen frei (GitHub Pages kann die nötigen Header nicht selbst setzen). -->
+<script src="coi-serviceworker.min.js"></script>
+<script type="module" src="app.js?v=__BUILD__"></script>
+</head>
+<body>
+<a class="skip" href="#inhalt">Zum Inhalt springen</a>
+<header class="top">
+  <span class="brand">Audio zu Text</span>
+  <a href="#hilfe">So funktioniert es</a>
+</header>
+
+<main id="inhalt" class="wrap">
+  <noscript><p class="notice notice-warn">Diese Seite braucht JavaScript.</p></noscript>
+  <div id="unsupported" class="notice notice-warn" hidden></div>
+
+  <ol class="steps" id="steps" aria-label="Fortschritt"></ol>
+
+  <!-- Schritt 1: Dateien -->
+  <section id="step1" class="stack" aria-labelledby="step1-title">
+    <h1 id="step1-title" class="visually-hidden">Schritt 1: Dateien auswählen</h1>
+    <label class="dropzone" id="dropzone" for="file-input">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4"/><path d="M7 9l5-5 5 5"/><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg>
+      <span class="dz-title">Dateien hierher ziehen oder hier klicken</span>
+      <span class="dz-sub">MP3, WAV, M4A, OGG, MP4, MOV und mehr · mehrere Dateien auf einmal möglich</span>
+      <span class="btn btn-primary dz-btn" aria-hidden="true">Dateien auswählen</span>
+    </label>
+    <input id="file-input" class="visually-hidden" type="file" multiple accept="audio/*,video/*,.mp3,.wav,.m4a,.ogg,.oga,.opus,.flac,.aac,.wma,.webm,.mp4,.m4v,.mov,.mkv">
+
+    <section class="stack-sm" id="file-list-wrap" hidden aria-labelledby="files-title">
+      <h2 id="files-title" class="h2">Deine Dateien</h2>
+      <ul class="file-list" id="file-list"></ul>
+    </section>
+
+    <section class="card settings" aria-labelledby="settings-title">
+      <h2 id="settings-title" class="h2">Einstellungen</h2>
+      <div class="settings-grid">
+        <div class="field">
+          <label for="set-model">Qualität</label>
+          <select id="set-model">
+            <option value="small">Ausgewogen (empfohlen)</option>
+            <option value="base">Schnell – mehr Fehler</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="set-language">Sprache</label>
+          <select id="set-language">
+            <option value="de">Deutsch</option>
+            <option value="en">Englisch</option>
+            <option value="fr">Französisch</option>
+            <option value="es">Spanisch</option>
+            <option value="it">Italienisch</option>
+            <option value="nl">Niederländisch</option>
+            <option value="pl">Polnisch</option>
+            <option value="tr">Türkisch</option>
+            <option value="ru">Russisch</option>
+            <option value="uk">Ukrainisch</option>
+            <option value="ar">Arabisch</option>
+            <option value="auto">Automatisch erkennen</option>
+          </select>
+        </div>
+        <div class="field">
+          <span class="label" id="spk-label">Sprecher erkennen</span>
+          <label class="switch">
+            <input id="set-diarize" type="checkbox" role="switch" aria-labelledby="spk-label">
+            <span class="switch-track" aria-hidden="true"></span>
+            <span id="set-diarize-state">Aus</span>
+          </label>
+        </div>
+        <div class="field" id="field-speakers" hidden>
+          <label for="set-speakers">Wie viele Personen sprechen?</label>
+          <select id="set-speakers">
+            <option value="auto">Automatisch erkennen</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <p class="muted small" id="mode-info">Dieses Gerät wird geprüft …</p>
+        <button type="button" class="btn-link small" data-action="retry-gpu" id="retry-gpu" hidden>Grafikkarte erneut versuchen</button>
+      </div>
+    </section>
+
+    <div class="row">
+      <button type="button" class="btn btn-primary btn-lg" id="start-btn" disabled>Umwandeln starten</button>
+      <span class="muted" id="start-hint">Wähle zuerst mindestens eine Datei aus.</span>
+    </div>
+  </section>
+
+  <!-- Schritt 2: Umwandeln -->
+  <section id="step2" class="stack" hidden aria-labelledby="progress-title">
+    <section class="card progress-card">
+      <div class="ring" role="progressbar" aria-label="Fortschritt" aria-valuemin="0" aria-valuemax="100">
+        <svg width="140" height="140" viewBox="0 0 140 140" aria-hidden="true">
+          <circle cx="70" cy="70" r="58" fill="none" class="ring-bg" stroke-width="12"/>
+          <circle cx="70" cy="70" r="58" fill="none" class="ring-fg" stroke-width="12" stroke-linecap="round" stroke-dasharray="0 365" transform="rotate(-90 70 70)" id="ring-fg"/>
+        </svg>
+        <span class="ring-label" id="ring-label" aria-hidden="true">0 %</span>
+      </div>
+      <div class="stack-xs center">
+        <h1 class="h1" id="progress-title">Wird vorbereitet …</h1>
+        <p class="lead muted" id="progress-sub" aria-live="polite"></p>
+      </div>
+      <div class="chips" id="progress-chips"></div>
+      <button type="button" class="btn btn-secondary btn-lg" id="cancel-btn">Abbrechen</button>
+    </section>
+
+    <div class="notice notice-tip">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg>
+      <div>
+        <strong>Bitte diesen Tab offen und sichtbar lassen</strong>
+        <span>Nicht minimieren und den Laptop nicht zuklappen. Der Bildschirm bleibt so lange automatisch an.</span>
+      </div>
+    </div>
+
+    <section class="stack-sm" aria-labelledby="queue-title">
+      <h2 class="h2" id="queue-title">Deine Dateien</h2>
+      <ul class="file-list" id="queue-list"></ul>
+      <button type="button" class="btn btn-dashed" id="add-more-btn">+ Weitere Dateien hinzufügen</button>
+    </section>
+
+    <section class="summary" id="summary-2"></section>
+  </section>
+
+  <!-- Schritt 3: Ergebnis -->
+  <section id="step3" class="stack" hidden aria-labelledby="result-title">
+    <div class="notice notice-info" id="still-running" hidden></div>
+    <div class="notice notice-warn" id="failed-box" role="alert" hidden></div>
+
+    <nav class="file-chips" id="result-files" aria-label="Ergebnis für"></nav>
+
+    <section class="card result-card">
+      <div class="result-head">
+        <div class="stack-xs">
+          <h1 class="h1" id="result-title"></h1>
+          <p class="muted" id="result-sub"></p>
+        </div>
+        <div class="row-wrap" id="result-actions">
+          <button type="button" class="btn btn-primary" data-action="dl-srt">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/></svg>
+            Untertitel (SRT)
+          </button>
+          <button type="button" class="btn btn-secondary" data-action="dl-txt">Text (TXT)</button>
+          <button type="button" class="btn btn-secondary" data-action="copy">Text kopieren</button>
+          <button type="button" class="btn btn-secondary" data-action="dl-zip" id="zip-btn">Alle als ZIP</button>
+        </div>
+        <p class="small muted" id="copy-status" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Ansicht">
+        <button type="button" role="tab" id="tab-text" aria-controls="panel-text" aria-selected="true">Text</button>
+        <button type="button" role="tab" id="tab-subs" aria-controls="panel-subs" aria-selected="false" tabindex="-1">Untertitel</button>
+      </div>
+
+      <div role="tabpanel" id="panel-text" aria-labelledby="tab-text" class="panel">
+        <div class="transcript" id="transcript"></div>
+      </div>
+
+      <div role="tabpanel" id="panel-subs" aria-labelledby="tab-subs" class="panel" hidden>
+        <div class="stack-xs" id="timeline-wrap" hidden>
+          <div class="row-between">
+            <span class="strong">Wer spricht wann</span>
+            <span class="legend" id="legend"></span>
+          </div>
+          <div class="timeline" id="timeline" aria-hidden="true"></div>
+          <div class="timeline-scale" id="timeline-scale" aria-hidden="true"></div>
+        </div>
+        <div class="names" id="names" hidden></div>
+        <div class="cues" id="cues"></div>
+      </div>
+
+      <p class="small muted panel-foot" id="removed-note" hidden></p>
+    </section>
+
+    <section class="summary" id="summary-3"></section>
+  </section>
+
+  <section id="hilfe" class="card info stack-sm" aria-labelledby="hilfe-title">
+    <h2 class="h2" id="hilfe-title">So funktioniert es</h2>
+    <ol class="plain-list">
+      <li><strong>Dateien wählen:</strong> eine oder mehrere Audio- oder Videodateien hineinziehen oder auswählen.</li>
+      <li><strong>Umwandeln:</strong> Die Seite wandelt die Dateien nacheinander in Text um. Beim allerersten Mal wird das Sprachmodell einmalig geladen (je nach Gerät ca. 280–360 MB bei „Ausgewogen“, ca. 100–120 MB bei „Schnell“; für die Sprecher-Erkennung zusätzlich ca. 33 MB). Danach bleibt es im Browser gespeichert.</li>
+      <li><strong>Ergebnis:</strong> Text kopieren oder als TXT laden, Untertitel als SRT für Videoprogramme (z. B. CapCut, Premiere, DaVinci Resolve) laden.</li>
+    </ol>
+    <p class="muted">Tipps: Chrome oder Edge verwenden. Tab sichtbar lassen. „Sprecher erkennen“ funktioniert am besten, wenn sich die Personen nicht ins Wort fallen. Bei langen Aufnahmen kann die Zuordnung manchmal wechseln – die Namen lassen sich im Ergebnis ändern.</p>
+    <p class="muted">Lange Wartezeit? Auf Laptops ohne geeignete Grafikkarte rechnet der Prozessor; das dauert länger. „Schnell“ ist deutlich schneller, macht aber mehr Fehler.</p>
+  </section>
+
+  <section id="datenschutz" class="card info stack-sm" aria-labelledby="datenschutz-title">
+    <h2 class="h2" id="datenschutz-title">Datenschutz</h2>
+    <p>Die Umwandlung läuft vollständig in deinem Browser auf diesem Gerät. Deine Audio- und Videodateien und die Texte werden <strong>nicht hochgeladen</strong> und nirgends gespeichert.</p>
+    <p>Die Seite und die Sprachmodelle werden von GitHub Pages (GitHub Inc.) ausgeliefert. Dabei verarbeitet GitHub wie bei jedem Website-Aufruf technische Daten wie deine IP-Adresse. Es werden keine anderen Dienste, keine Cookies und kein Tracking verwendet. Die Modelle und deine Einstellungen werden im Speicher deines Browsers abgelegt und können dort jederzeit gelöscht werden (Browserdaten löschen).</p>
+  </section>
+
+  <section class="card info stack-sm" aria-labelledby="lizenzen-title">
+    <h2 class="h2" id="lizenzen-title">Verwendete Modelle und Software</h2>
+    <ul class="plain-list small">
+      <li>Spracherkennung: Whisper „small“ und „base“ von OpenAI (MIT-Lizenz), ONNX-Fassung von onnx-community</li>
+      <li>Sprecherwechsel: pyannote segmentation-3.0 (MIT-Lizenz)</li>
+      <li>Stimm-Wiedererkennung: <a href="https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM" rel="noopener">wespeaker-voxceleb-resnet34-LM</a> (WeSpeaker-Projekt, bereitgestellt von pyannote), trainiert auf VoxCeleb, Lizenz <a href="https://creativecommons.org/licenses/by/4.0/deed.de" rel="noopener">CC BY 4.0</a>. Änderung: ins ONNX-Format umgewandelt von onnx-community.</li>
+      <li>Transformers.js von Hugging Face (Apache-2.0), ONNX Runtime Web von Microsoft (MIT), fflate (MIT), coi-serviceworker (MIT), Schrift Figtree (SIL Open Font License)</li>
+    </ul>
+    <p class="small muted"><a href="licenses/LIZENZEN.txt">Alle Lizenztexte</a> · Version __BUILD__</p>
+  </section>
+</main>
+
+<footer class="foot">
+  Deine Dateien verlassen nie dieses Gerät. Die Umwandlung läuft in deinem Browser. <a href="#datenschutz">Datenschutz</a>
+</footer>
+</body>
+</html>
