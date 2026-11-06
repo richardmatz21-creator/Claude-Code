@@ -22,6 +22,8 @@ Statische Website auf GitHub Pages (`https://richardmatz21-creator.github.io/Cla
 - Ausgabe: Text kopieren, TXT, SRT, alle als ZIP.
 - Sprecher-Erkennung als Schalter (Standard aus), mit Wiedererkennung der Stimmen über die ganze Aufnahme; Anzahl Personen automatisch oder 2–5 wählbar; Sprecher umbenennbar.
 - Fortschritt, Restzeit, Abbrechen, Bildschirm bleibt an (Wake Lock), Hinweis „Tab sichtbar lassen“.
+- Bearbeiten (Wunsch Besitzer, Design A + C): Text-Ansicht direkt editierbar pro Abschnitt (contenteditable, Abschnitt = Whisper-Segment, damit Zeitstempel erhalten bleiben), ▶ beim aktiven Abschnitt + Strg+Leertaste, Korrektur-Modus Satz für Satz mit Anhören, Suchen & Ersetzen (aktuelle Datei) mit Rückgängig, Original wiederherstellen, leere Abschnitte fallen aus TXT/SRT. Anhören spielt die Originaldatei per Object-URL ab.
+- Nichts wird gespeichert (Entscheidung Besitzer): Warnung beim Schließen, solange Ergebnisse/Korrekturen nicht heruntergeladen sind.
 - Nicht enthalten: Mikrofon-Aufnahme, Word-Datei, Handy-Optimierung.
 
 ## Technische Stolperfallen (schon gelöst, nicht wieder einbauen)

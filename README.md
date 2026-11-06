@@ -11,6 +11,8 @@ Eine Website, die Audio- und Videodateien mit [Whisper](https://github.com/opena
 - Sprache standardmäßig Deutsch, umstellbar oder automatisch
 - Ergebnis als Text (kopieren oder TXT) und Untertitel (SRT), mehrere Dateien als ZIP
 - **Sprecher erkennen** (Schalter): wer spricht wann, Namen umbenennbar, in Text und SRT
+- **Text korrigieren:** direkt im Text klicken und tippen (geänderte Stellen gelb markiert), Stelle anhören per ▶ oder Strg+Leertaste, „Satz für Satz korrigieren“ mit Anhören und Weiter-Knopf, „Suchen & Ersetzen“ mit Rückgängig, Original pro Abschnitt wiederherstellen, geleerte Abschnitte fallen aus TXT/SRT heraus. Korrekturen landen automatisch in Text, Untertiteln, TXT, SRT und ZIP.
+- Es wird nichts gespeichert: Beim Schließen warnt die Seite, solange Ergebnisse oder Korrekturen nicht heruntergeladen sind
 - Filter für typische erfundene Whisper-Sätze bei Stille („Untertitel im Auftrag des ZDF …“) und Wiederholungsschleifen
 - Nutzt die Grafikkarte (WebGPU mit fp16), sonst den Prozessor mit mehreren Kernen
 - Fortschritt mit Restzeit, Abbrechen, Bildschirm bleibt während der Umwandlung an

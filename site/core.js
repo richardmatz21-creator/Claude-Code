@@ -364,24 +364,70 @@ export function toSrt(segments, opts = {}) {
     .join('\n');
 }
 
-/** Fließtext in Absätzen. Mit Sprechern: ein Absatz pro Redebeitrag. */
-export function toParagraphs(segments, { names = null, withSpeakers = false } = {}) {
-  const paras = [];
-  for (const seg of segments) {
-    const last = paras.at(-1);
+/**
+ * Fasst Abschnitte zu Absätzen zusammen, behält aber die Abschnitte einzeln (für die Bearbeitung).
+ * Mit Sprechern: ein Absatz pro Redebeitrag. Sonst: neuer Absatz nach Pausen > 1,5 s oder ab 600 Zeichen.
+ * @returns [{ speaker, start, end, label, items: [{ index, seg }] }]
+ */
+export function groupParagraphs(segments, { names = null, withSpeakers = false } = {}) {
+  const groups = [];
+  segments.forEach((seg, index) => {
+    const last = groups.at(-1);
+    const len = last ? last.items.reduce((n, it) => n + it.seg.text.length + 1, 0) : 0;
     const sameSpeaker = last && (!withSpeakers || last.speaker === seg.speaker);
-    const smallGap = last && seg.start - last.end < 1.5 && last.text.length < 600;
+    const smallGap = last && seg.start - last.end < 1.5 && len < 600;
     if (last && sameSpeaker && (withSpeakers || smallGap)) {
-      last.text += ' ' + seg.text.trim();
+      last.items.push({ index, seg });
       last.end = seg.end;
     } else {
-      paras.push({ speaker: seg.speaker, start: seg.start, end: seg.end, text: seg.text.trim() });
+      groups.push({ speaker: seg.speaker, start: seg.start, end: seg.end, items: [{ index, seg }] });
     }
-  }
-  return paras.map((p) => ({
-    ...p,
-    label: withSpeakers ? speakerName(names, p.speaker ?? 0) : null,
+  });
+  return groups.map((g) => ({ ...g, label: withSpeakers ? speakerName(names, g.speaker ?? 0) : null }));
+}
+
+/** Fließtext in Absätzen. Mit Sprechern: ein Absatz pro Redebeitrag. */
+export function toParagraphs(segments, opts = {}) {
+  return groupParagraphs(segments, opts).map(({ items, ...g }) => ({
+    ...g,
+    text: items.map((it) => it.seg.text.trim()).filter(Boolean).join(' '),
   }));
+}
+
+/** Nur Abschnitte mit Text – geleerte Abschnitte fallen aus Text, TXT und SRT heraus. */
+export function activeSegments(segments) {
+  return segments.filter((s) => s.text && s.text.trim());
+}
+
+// ---------- Suchen und Ersetzen ----------
+
+function searchRegExp(query) {
+  return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu');
+}
+
+/** Fundstellen in einem Text (ohne Beachtung von Groß-/Kleinschreibung) als [start, end]. */
+export function findMatches(text, query) {
+  if (!query) return [];
+  return Array.from(text.matchAll(searchRegExp(query)), (m) => [m.index, m.index + m[0].length]);
+}
+
+export function countMatches(segments, query) {
+  if (!query) return 0;
+  return segments.reduce((n, s) => n + findMatches(s.text, query).length, 0);
+}
+
+/** Ersetzt alle Fundstellen in den Abschnitten. Gibt die Anzahl der Ersetzungen zurück. */
+export function replaceAll(segments, query, replacement) {
+  if (!query) return 0;
+  let count = 0;
+  for (const s of segments) {
+    let hits = 0;
+    const text = s.text.replace(searchRegExp(query), () => { hits++; return replacement; });
+    // Doppelte Leerzeichen aufräumen (z. B. beim Ersetzen durch leeren Text).
+    if (hits) s.text = text.replace(/ {2,}/g, ' ').replace(/ ([,.!?;:])/g, '$1').trim();
+    count += hits;
+  }
+  return count;
 }
 
 export function toTxt(segments, opts = {}) {

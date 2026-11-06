@@ -156,7 +156,58 @@
           <button type="button" class="btn btn-secondary" data-action="dl-zip" id="zip-btn">Alle als ZIP</button>
         </div>
         <p class="small muted" id="copy-status" role="status" aria-live="polite"></p>
+        <p class="small unsaved-hint" id="unsaved-hint" hidden>Deine Korrekturen sind noch nicht heruntergeladen. Die Seite speichert nichts – bitte vor dem Schließen SRT oder TXT laden.</p>
       </div>
+
+      <div class="edit-bar" id="edit-bar">
+        <button type="button" class="btn btn-secondary btn-small" data-action="corr-start">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          Satz für Satz korrigieren
+        </button>
+        <button type="button" class="btn btn-secondary btn-small" data-action="search-toggle" id="search-toggle" aria-expanded="false" aria-controls="search-bar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          Suchen &amp; Ersetzen
+        </button>
+      </div>
+
+      <div class="search-bar" id="search-bar" hidden>
+        <div class="field">
+          <label for="search-q">Suchen</label>
+          <input id="search-q" type="search" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="search-r">Ersetzen durch</label>
+          <input id="search-r" type="text" autocomplete="off">
+        </div>
+        <div class="search-actions">
+          <span class="small muted" id="search-count" role="status" aria-live="polite"></span>
+          <button type="button" class="btn btn-primary btn-small" data-action="replace-all" id="replace-all" disabled>Alle ersetzen</button>
+          <button type="button" class="btn btn-secondary btn-small" data-action="replace-undo" id="replace-undo" hidden>Rückgängig</button>
+        </div>
+      </div>
+
+      <section class="panel correct" id="correct" hidden aria-labelledby="corr-pos">
+        <div class="row-between">
+          <h2 class="h2" id="corr-pos" aria-live="polite">Abschnitt 1 von 1</h2>
+          <span class="muted" id="corr-meta"></span>
+        </div>
+        <div class="row">
+          <button type="button" class="btn btn-secondary" data-action="corr-play" id="corr-play">Anhören</button>
+          <label class="check"><input type="checkbox" id="corr-auto" checked> Beim Weiterblättern automatisch abspielen</label>
+        </div>
+        <label for="corr-text" class="label">Text dieses Abschnitts</label>
+        <textarea id="corr-text" rows="4"></textarea>
+        <div class="corr-orig" id="corr-orig" hidden>
+          <span class="small muted" id="corr-orig-text"></span>
+          <button type="button" class="btn-link small" data-action="corr-reset">Original wiederherstellen</button>
+        </div>
+        <p class="small muted">Tastatur: Strg+Leertaste = anhören · Strg+Enter = weiter · Text leeren = Abschnitt fällt aus TXT und SRT heraus</p>
+        <div class="row-between">
+          <button type="button" class="btn btn-secondary" data-action="corr-prev" id="corr-prev">← Zurück</button>
+          <button type="button" class="btn btn-secondary" data-action="corr-done" id="corr-done">Korrektur beenden</button>
+          <button type="button" class="btn btn-primary" data-action="corr-next" id="corr-next">Weiter →</button>
+        </div>
+      </section>
 
       <div class="tabs" role="tablist" aria-label="Ansicht">
         <button type="button" role="tab" id="tab-text" aria-controls="panel-text" aria-selected="true">Text</button>
@@ -164,6 +215,8 @@
       </div>
 
       <div role="tabpanel" id="panel-text" aria-labelledby="tab-text" class="panel">
+        <p class="small muted edit-tip">Fehler entdeckt? Einfach in den Text klicken und korrigieren. Mit <kbd>Strg</kbd>+<kbd>Leertaste</kbd> oder dem Knopf „Anhören“ hörst du die Stelle.</p>
+        <a class="skip-inline" href="#summary-3">Text überspringen</a>
         <div class="transcript" id="transcript"></div>
       </div>
 
@@ -177,6 +230,7 @@
           <div class="timeline-scale" id="timeline-scale" aria-hidden="true"></div>
         </div>
         <div class="names" id="names" hidden></div>
+        <p class="small muted">Korrigieren kannst du im Tab „Text“ oder mit „Satz für Satz korrigieren“ – die Untertitel übernehmen jede Änderung.</p>
         <div class="cues" id="cues"></div>
       </div>
 

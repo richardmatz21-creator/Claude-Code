@@ -5,6 +5,7 @@ import {
   planChunks, frameLevels, speechLevel, isQuiet, filterHallucinations, formatSrtTime,
   splitText, wrapLines, buildCues, toSrt, toTxt, clusterSpeakers, assignSpeakers,
   speakerTimeline, baseName, SAMPLE_RATE, planSpeechChunks, assembleChunk, chunkTimeToSource,
+  groupParagraphs, activeSegments, findMatches, countMatches, replaceAll,
 } from '../site/core.js';
 
 let failed = 0;
@@ -189,6 +190,52 @@ test('toTxt: Absätze je Sprecher', () => {
     { start: 4, end: 6, text: 'Gut.', speaker: 1 },
   ], { withSpeakers: true, names: ['Anna', ''] });
   assert.equal(txt, 'Anna: Hallo. Wie geht es?\n\nSprecher 2: Gut.\n');
+});
+
+test('groupParagraphs behält jeden Abschnitt mit seiner Nummer', () => {
+  const segs = [
+    { start: 0, end: 2, text: 'Hallo.', speaker: 0 },
+    { start: 2, end: 4, text: 'Wie geht es?', speaker: 0 },
+    { start: 4, end: 6, text: 'Gut.', speaker: 1 },
+  ];
+  const groups = groupParagraphs(segs, { withSpeakers: true });
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups[0].items.map((it) => it.index), [0, 1]);
+  assert.deepEqual(groups[1].items.map((it) => it.index), [2]);
+  assert.equal(groups[1].label, 'Sprecher 2');
+});
+
+test('Geleerte Abschnitte fallen aus TXT und SRT heraus', () => {
+  const segs = [
+    { start: 0, end: 2, text: 'Erster Satz.' },
+    { start: 2, end: 3, text: '   ' },
+    { start: 3, end: 5, text: 'Dritter Satz.' },
+  ];
+  const live = activeSegments(segs);
+  assert.equal(live.length, 2);
+  assert.equal(toTxt(live), 'Erster Satz. Dritter Satz.\n');
+  assert.equal(toSrt(live).split('\n\n').length, 2);
+});
+
+test('Suchen und Ersetzen: ohne Groß-/Kleinschreibung, Sonderzeichen wörtlich', () => {
+  const segs = [
+    { text: 'Gelen, am wichtigsten ist uns …' },
+    { text: 'Das sagte gelen auch. (C++) kostet 5$.' },
+  ];
+  assert.equal(countMatches(segs, 'gelen'), 2);
+  assert.deepEqual(findMatches(segs[0].text, 'GELEN'), [[0, 5]]);
+  assert.equal(countMatches(segs, '(C++)'), 1);
+  assert.equal(countMatches(segs, ''), 0);
+  const n = replaceAll(segs, 'gelen', 'Gerne');
+  assert.equal(n, 2);
+  assert.equal(segs[0].text, 'Gerne, am wichtigsten ist uns …');
+  assert.equal(segs[1].text, 'Das sagte Gerne auch. (C++) kostet 5$.');
+  replaceAll(segs, '5$', '$& 10 €');
+  assert.ok(segs[1].text.includes('$& 10 €'), 'Ersetzung wird wörtlich eingesetzt');
+  assert.equal(countMatches([{ text: 'Über über ÜBER' }], 'über'), 3);
+  const empty = [{ text: 'Ich ähm bin da ähm.' }];
+  replaceAll(empty, 'ähm', '');
+  assert.equal(empty[0].text, 'Ich bin da.', 'keine doppelten Leerzeichen nach Ersetzen durch leer');
 });
 
 test('clusterSpeakers trennt zwei Stimmen und hält feste Anzahl ein', () => {
