@@ -1,0 +1,43 @@
+# Baut die Seite und testet sie echt im Browser (Prozessor-Modus, deutsche Testaufnahme).
+name: Tests
+
+on:
+  push:
+    branches: ['claude/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Modelle aus dem Cache holen
+        uses: actions/cache@v6
+        with:
+          path: .cache/models
+          key: models-${{ hashFiles('scripts/models.json') }}
+      - name: Seite bauen
+        run: node scripts/build.mjs
+      - name: Schnelltests
+        run: node tests/unit.mjs
+      - name: Browser installieren
+        run: npx playwright install --with-deps chromium
+      - name: Ende-zu-Ende-Test im Browser
+        run: node tests/e2e.mjs --screens screenshots
+      - name: Bildschirmfotos aufheben
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: screenshots
+          path: screenshots
+          if-no-files-found: ignore

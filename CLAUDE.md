@@ -20,9 +20,17 @@ Statische Website auf GitHub Pages (`https://richardmatz21-creator.github.io/Cla
 - Sprache standardmäßig Deutsch, umstellbar, nie übersetzen.
 - Filter für erfundene Whisper-Sätze bei Stille (z. B. „Untertitel im Auftrag des ZDF …“, „Untertitel der Amara.org-Community“) und Wiederholungsschleifen.
 - Ausgabe: Text kopieren, TXT, SRT, alle als ZIP.
-- Sprecher-Erkennung als Schalter (Standard aus), mit Wiedererkennung der Stimmen über die ganze Aufnahme; Sprecher umbenennbar.
+- Sprecher-Erkennung als Schalter (Standard aus), mit Wiedererkennung der Stimmen über die ganze Aufnahme; Anzahl Personen automatisch oder 2–5 wählbar; Sprecher umbenennbar.
 - Fortschritt, Restzeit, Abbrechen, Bildschirm bleibt an (Wake Lock), Hinweis „Tab sichtbar lassen“.
 - Nicht enthalten: Mikrofon-Aufnahme, Word-Datei, Handy-Optimierung.
+
+## Technische Stolperfallen (schon gelöst, nicht wieder einbauen)
+- transformers.js 4.3: `env.localModelPath` muss ein **Pfad** sein (`/Claude-Code/models/`), keine volle URL – sonst findet es lokale Dateien wie `preprocessor_config.json` nicht.
+- ONNX-Runtime-WASM-Dateien explizit über `env.backends.onnx.wasm.wasmPaths` auf `vendor/` setzen, sonst lädt transformers.js sie von jsDelivr.
+- GPU-Modus: Encoder `fp16` auf WebGPU, Decoder `q8` auf WASM (die fp16-Encoder haben fp32-Ein-/Ausgänge, das passt). Ohne `shader-f16` → Prozessor-Modus.
+- `coi-serviceworker.min.js` muss im Hauptordner liegen (Mehrkern-WASM braucht COOP/COEP, GitHub Pages setzt keine Header). Erster Besuch lädt einmal neu.
+- Builds in Claude-Cloud-Sessions brauchen `NODE_USE_ENV_PROXY=1`; Hugging Face liefert große Dateien über `us.aws.cdn.hf.co`.
+- Testrechner haben keine fp16-Grafikkarte: automatisch testbar ist nur der Prozessor-Modus.
 
 ## Arbeitsablauf
 - Arbeiten auf einem `claude/…`-Branch, dann Pull Request nach `main`. Gemergt wird nur nach ausdrücklichem OK des Besitzers.

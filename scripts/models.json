@@ -1,0 +1,55 @@
+{
+  "_comment": "Modelle, die beim Build in fester Version von Hugging Face geladen und mit der Seite ausgeliefert werden. Nie zur Laufzeit von Hugging Face laden.",
+  "models": [
+    {
+      "id": "onnx-community/whisper-small",
+      "revision": "36050c46d777d46dc4b5f43f6d90574fc38f8732",
+      "license": "MIT (OpenAI Whisper)",
+      "files": [
+        "config.json",
+        "generation_config.json",
+        "preprocessor_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "onnx/encoder_model_fp16.onnx",
+        "onnx/encoder_model_quantized.onnx",
+        "onnx/decoder_model_merged_quantized.onnx"
+      ]
+    },
+    {
+      "id": "onnx-community/whisper-base",
+      "revision": "27a07b4b52b3a4c5886134bb4320e93e1a4bbc7c",
+      "license": "MIT (OpenAI Whisper)",
+      "files": [
+        "config.json",
+        "generation_config.json",
+        "preprocessor_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "onnx/encoder_model_fp16.onnx",
+        "onnx/encoder_model_quantized.onnx",
+        "onnx/decoder_model_merged_quantized.onnx"
+      ]
+    },
+    {
+      "id": "onnx-community/pyannote-segmentation-3.0",
+      "revision": "733a93b6473d019a773298e08cefa686894b1854",
+      "license": "MIT",
+      "files": [
+        "config.json",
+        "preprocessor_config.json",
+        "onnx/model.onnx"
+      ]
+    },
+    {
+      "id": "onnx-community/wespeaker-voxceleb-resnet34-LM",
+      "revision": "6a61a1833ff2583aabeba044f5c8221f00b67ceb",
+      "license": "CC BY 4.0",
+      "files": [
+        "config.json",
+        "preprocessor_config.json",
+        "onnx/model.onnx"
+      ]
+    }
+  ]
+}
