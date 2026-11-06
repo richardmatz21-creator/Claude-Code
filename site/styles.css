@@ -286,3 +286,24 @@ kbd { font: inherit; font-size: 13px; padding: 1px 6px; border: 1px solid var(--
 .unsaved-hint { margin: 0; color: var(--tip-ink); background: var(--tip-bg); border-radius: 10px; padding: 8px 12px; }
 .skip-inline { position: absolute; left: -9999px; }
 .skip-inline:focus { position: static; align-self: flex-start; font-weight: 700; }
+
+/* Textgerüst */
+.script-controls { display: flex; flex-wrap: wrap; gap: 16px 20px; align-items: flex-end; }
+.script-controls .field { flex: 1 1 200px; }
+.script-controls .field-wide { flex: 2 1 320px; }
+input[type="range"] { width: 100%; min-height: 44px; accent-color: var(--accent); }
+.range-ends { display: flex; justify-content: space-between; margin-top: -6px; }
+.script-blocks { display: flex; flex-direction: column; gap: 10px; }
+.sblock { border: 1px solid var(--line-soft); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; background: #fff; }
+.sblock.t-OFF { background: var(--bg); }
+.sblock.t-Sit { border-color: #C9D3DF; }
+.sblock-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.sblock-head select { width: auto; min-height: 40px; font-weight: 800; padding: 0 10px; }
+.sblock-head input[type="text"] { width: auto; flex: 1 1 160px; max-width: 280px; min-height: 40px; }
+.sblock-time { margin-left: auto; font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sblock textarea {
+  width: 100%; padding: 8px 10px; border: 2px solid var(--field-line); border-radius: 10px; font: inherit; font-size: 16px;
+  line-height: 1.5; color: var(--ink); resize: vertical; min-height: 44px; background: #fff;
+}
+.sblock textarea:focus, .sblock-head input:focus, .sblock-head select:focus { border-color: #2457D6; outline: none; }
+.sblock.custom textarea { background: #FFF9E3; }

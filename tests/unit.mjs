@@ -6,6 +6,7 @@ import {
   splitText, wrapLines, buildCues, toSrt, toTxt, clusterSpeakers, assignSpeakers,
   speakerTimeline, baseName, SAMPLE_RATE, planSpeechChunks, assembleChunk, chunkTimeToSource,
   groupParagraphs, activeSegments, findMatches, countMatches, replaceAll,
+  buildScriptBlocks, shortenText, wordFrequencies, scriptDocxFiles, titleFromFileName,
 } from '../site/core.js';
 
 let failed = 0;
@@ -236,6 +237,133 @@ test('Suchen und Ersetzen: ohne Groß-/Kleinschreibung, Sonderzeichen wörtlich'
   const empty = [{ text: 'Ich ähm bin da ähm.' }];
   replaceAll(empty, 'ähm', '');
   assert.equal(empty[0].text, 'Ich bin da.', 'keine doppelten Leerzeichen nach Ersetzen durch leer');
+});
+
+// Alle Texte in diesen Tests sind frei erfunden.
+test('Textgerüst: OFF bei Stille, OT bei langen Beiträgen, Sit bei Hin und Her', () => {
+  const segs = [
+    { start: 4, end: 10, text: 'Heute zeige ich euch meinen Garten.', speaker: 0 },
+    { start: 10.5, end: 16, text: 'Hier wachsen die Tomaten am besten.', speaker: 0 }, // gleiche Stimme → ein OT (12 s)
+    { start: 16.5, end: 30, text: 'Ich bin der Ben und zum ersten Mal auf dem Hof.', speaker: 1 }, // direkt danach, lang → eigenes OT
+    { start: 36, end: 38, text: 'Grüß dich!', speaker: 1 },                            // nach 6 s Stille: Hin und Her → Sit
+    { start: 38.2, end: 40, text: 'Hallo, schön dass du da bist.', speaker: 0 },
+    { start: 40.3, end: 42, text: 'Danke, gerne.', speaker: 1 },
+    { start: 43, end: 45, text: 'Komm rein.', speaker: 0 },
+  ];
+  const blocks = buildScriptBlocks(segs, { duration: 52 });
+  assert.deepEqual(blocks.map((b) => b.type), ['OFF', 'OT', 'OT', 'OFF', 'Sit', 'OFF']);
+  assert.deepEqual(blocks[1].speakers, [0]);
+  assert.equal(blocks[1].full, 'Heute zeige ich euch meinen Garten. Hier wachsen die Tomaten am besten.');
+  assert.deepEqual(blocks[2].speakers, [1]);
+  assert.deepEqual(blocks[4].speakers.sort(), [0, 1]);
+  assert.equal(blocks[0].start, 0);
+  assert.equal(blocks.at(-1).end, 52);
+  // OFF-Grenze einstellbar: bei 8 s gibt es zwischen 30 s und 36 s kein OFF mehr (Bens Beiträge verschmelzen)
+  assert.deepEqual(buildScriptBlocks(segs, { duration: 52, offGap: 8 }).map((b) => b.type), ['OT', 'OT', 'Sit']);
+  // Leere Abschnitte zählen nicht; ohne Sprache ist alles OFF
+  assert.deepEqual(buildScriptBlocks([{ start: 0, end: 2, text: ' ', speaker: 0 }], { duration: 10 }).map((b) => b.type), ['OFF']);
+  // Ohne Sprecher-Erkennung: nur OT und OFF
+  const noSpk = segs.map(({ speaker, ...r }) => r);
+  assert.ok(buildScriptBlocks(noSpk, { duration: 52 }).every((b) => b.type !== 'Sit'));
+});
+
+test('Textgerüst: Pausen werden am Ton gemessen, nicht an den gepolsterten Abschnitten', () => {
+  // Ton von 0–10 s und 13,8–20 s (3,8 s echte Stille); Whisper-Abschnitte sind je 0,5 s gepolstert.
+  const levels = new Float32Array(200);
+  for (let f = 0; f < 200; f++) levels[f] = (f < 100 || f >= 138) ? 0.2 : 0.001;
+  const segs = [
+    { start: 0, end: 10.5, text: 'Erster langer Beitrag über den Hof.', speaker: 0 },
+    { start: 13.3, end: 20, text: 'Zweiter langer Beitrag über die Ernte.', speaker: 0 },
+  ];
+  assert.deepEqual(buildScriptBlocks(segs, { duration: 20 }).map((b) => b.type), ['OT']); // ohne Pegel: 2,8 s → kein OFF
+  const blocks = buildScriptBlocks(segs, { duration: 20, levels });
+  assert.deepEqual(blocks.map((b) => b.type), ['OT', 'OFF', 'OT']);
+  assert.ok(Math.abs(blocks[1].start - 10) < 0.15 && Math.abs(blocks[1].end - 13.8) < 0.15, JSON.stringify(blocks[1]));
+});
+
+test('Textgerüst: kurzer Einwurf einer zweiten Stimme macht aus dem Block ein Sit', () => {
+  const segs = [
+    { start: 0, end: 12, text: 'Ich erzähle jetzt ausführlich, wie mein Tag auf dem Hof beginnt.', speaker: 0 },
+    { start: 12.2, end: 13, text: 'Ja.', speaker: 1 },
+    { start: 13.2, end: 25, text: 'Zuerst füttere ich die Hühner und dann melke ich die Kühe.', speaker: 0 },
+  ];
+  const blocks = buildScriptBlocks(segs, { duration: 25 });
+  assert.deepEqual(blocks.map((b) => b.type), ['Sit', 'OT']);
+  assert.match(blocks[0].full, /Ja\.$/);
+});
+
+test('Kürzen: erste 3 … Schlagwörter … letzte 3, kurze Texte bleiben ganz', () => {
+  const t = 'Wir sind heute ziemlich früh losgegangen, weil der Wetterbericht für den Nachmittag ein Gewitter angesagt hat. Auf dem Weg zur Hütte haben wir dann tatsächlich zwei Gämsen gesehen, das war für mich ein echtes Highlight, und oben angekommen gab es Kaiserschmarrn mit Zwetschkenröster, den hat sich nach dem langen Aufstieg wirklich jeder verdient gehabt.';
+  const freq = wordFrequencies([t]);
+  const short = shortenText(t, { freq });
+  assert.ok(short.startsWith('Wir sind heute…'), short);
+  assert.ok(short.endsWith('…jeder verdient gehabt.'), short);
+  const kept = short.split(/…|\s+/).filter(Boolean).length;
+  const total = t.split(/\s+/).length;
+  assert.ok(kept / total < 0.35, `zu wenig gekürzt: ${kept}/${total}`);
+  assert.ok(short.split('…').length >= 3, 'keine Schlagwörter in der Mitte');
+  assert.ok(!/\.…/.test(short), 'Satzpunkt vor …');
+  assert.equal(shortenText('Ja, das hat wirklich richtig gut geklappt.'), 'Ja, das hat wirklich richtig gut geklappt.');
+});
+
+test('Kürzen: der Regler wirkt auch bei langen Blöcken', () => {
+  const long = [
+    'Auf dem Markt verkaufen wir Kartoffeln, Karotten und frischen Salat aus dem eigenen Garten.',
+    'Am Samstag kommen meistens die Stammkunden aus dem Dorf und fragen nach Eiern und Honig.',
+    'Meine Schwester backt dafür jede Woche Brot im alten Holzofen hinter der Scheune.',
+    'Im Sommer haben wir zusätzlich Erdbeeren, Kirschen und Marillen von den Bäumen am Hang.',
+    'Der Stand lohnt sich, auch wenn wir um fünf Uhr früh aufstehen und alles aufladen müssen.',
+    'Ohne die Hilfe der Nachbarn wäre das an manchen Tagen gar nicht zu schaffen, ehrlich gesagt.',
+    'Nächstes Jahr wollen wir einen kleinen Hofladen eröffnen, direkt neben dem Kuhstall.',
+    'Dafür brauchen wir noch eine Genehmigung von der Gemeinde und ein bisschen Glück beim Wetter.',
+    'Die Kinder helfen am Wochenende mit und verkaufen selbstgemachte Marmelade an die Touristen.',
+    'Am Abend sind alle müde, aber zufrieden, und wir sitzen noch lange auf der Bank vor dem Haus.',
+  ].join(' '); // ca. 150 Wörter
+  const freq = wordFrequencies([long]);
+  const lens = [0.12, 0.22, 0.32, 0.45, 0.6].map((ratio, i) =>
+    shortenText(long, { ratio, freq, ...[{ groupSize: 2, maxGroups: 2 }, { groupSize: 2, maxGroups: 3 }, { groupSize: 3, maxGroups: 5 }, { groupSize: 3, maxGroups: 8 }, { groupSize: 4, maxGroups: 12 }][i] })
+      .split(/…|\s+/).filter(Boolean).length);
+  for (let i = 1; i < lens.length; i++) assert.ok(lens[i] > lens[i - 1], `Stufe ${i + 1} nicht länger als Stufe ${i}: ${lens}`);
+});
+
+test('Kürzen: „…“ nur dort, wo wirklich etwas fehlt; Datum mit Punkt bleibt zusammen', () => {
+  // Schlagwort direkt nach den ersten 3 Wörtern → kein „…“ dazwischen
+  const t = 'Möchtest du noch Kaffee oder lieber einen Tee, wir haben auch Kakao und Kuchen da.';
+  const s1 = shortenText(t);
+  assert.ok(!s1.startsWith('Möchtest du noch…Kaffee'), s1);
+  const d = shortenText('Wir fahren dann gemeinsam am 15. Mai mit dem Traktor zum großen Erntefest ins Nachbardorf hinüber.');
+  assert.ok(!/…15…/.test(d), d);
+  // Ein Wort aus Anfang oder Ende wird nicht noch einmal als Schlagwort gewählt
+  const r = shortenText('Also mit Anna habe ich lange über Anna und ihre Pferde gesprochen und wie es mit Anna weitergeht.');
+  assert.ok((r.match(/Anna/g) ?? []).length <= 2, r);
+});
+
+test('Word-Datei: Querformat, 3 Spalten, grüne Titelzeile, OFF fett, Timecode, Sonderzeichen sicher', () => {
+  const files = scriptDocxFiles({
+    title: 'Hof Anna & <Folge 3>\u000b',
+    blocks: [
+      { type: 'OFF', label: 'OFF', text: 'Sprechertext zum Hof.', start: 0, end: 4 },
+      { type: 'OT', label: 'OT Anna', text: 'Heute zeige ich…Tomaten…am besten.', start: 4, end: 21 },
+      { type: 'Sit', label: 'Sit', text: 'Grüß dich…komm rein.', start: 26, end: 33 },
+    ],
+  });
+  const doc = files['word/document.xml'];
+  for (const k of ['[Content_Types].xml', '_rels/.rels', 'word/_rels/document.xml.rels', 'word/styles.xml']) assert.ok(files[k], k);
+  assert.match(doc, /w:orient="landscape"/);
+  assert.equal((doc.match(/<w:gridCol /g) ?? []).length, 3);
+  assert.match(doc, /w:fill="8DD873"/);
+  assert.match(doc, /Hof Anna &amp; &lt;Folge 3&gt;</);
+  assert.ok(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(doc), 'Steuerzeichen im XML');
+  assert.match(doc, /<w:b\/><w:bCs\/><\/w:rPr><w:t xml:space="preserve">OFF<\/w:t>/);
+  assert.match(doc, /<w:b\/><w:bCs\/><\/w:rPr><w:t xml:space="preserve">Sprechertext zum Hof\.<\/w:t>/, 'OFF-Text nicht fett');
+  assert.match(doc, /OT Anna/);
+  assert.match(doc, /00:04 – 00:21/);
+  assert.equal((doc.match(/<w:tr>/g) ?? []).length, 4);
+  assert.equal((doc.match(/<w:tc>/g) ?? []).length, (doc.match(/<\/w:tc>/g) ?? []).length);
+});
+
+test('Titel aus Dateiname', () => {
+  assert.equal(titleFromFileName('Folge_3_Anna mit Kamera.mp4'), 'Folge 3 Anna mit Kamera');
 });
 
 test('clusterSpeakers trennt zwei Stimmen und hält feste Anzahl ein', () => {
