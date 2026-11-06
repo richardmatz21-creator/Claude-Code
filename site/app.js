@@ -2,8 +2,11 @@
 import {
   SAMPLE_RATE, toSrt, toTxt, toParagraphs, buildCues, speakerTimeline, formatClock, formatSrtTime,
   baseName, speakerName,
-} from './core.js';
-import { zipSync, strToU8 } from './vendor/fflate.js';
+} from './core.js?v=__BUILD__';
+import { zipSync, strToU8 } from './__ASSETS__/vendor/fflate.js';
+
+// Ersetzt der Build durch die Versionskennung.
+const BUILD = '__BUILD__';
 
 const $ = (id) => document.getElementById(id);
 const BIG_FILE = 500 * 1024 * 1024;
@@ -19,7 +22,8 @@ const DIAR_SHARE = 0.12; // Anteil der Sprecher-Erkennung am Gesamtfortschritt
 // ---------- Zustand ----------
 
 function loadSettings() {
-  const defaults = { model: 'small', language: 'de', diarize: false, speakers: 'auto', gpuBroken: false };
+  // gpuBrokenBuild: Version, in der die Grafikkarte versagt hat (gilt nur bis zum nächsten Update).
+  const defaults = { model: 'small', language: 'de', diarize: false, speakers: 'auto', gpuBrokenBuild: null };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     return { ...defaults, ...saved };
@@ -45,6 +49,9 @@ const state = {
   tab: 'text',
   loadInfo: null,
   whisperReady: false,
+  workerReady: false,
+  gpuDisabled: false,
+  runId: 0,
 };
 let nextId = 1;
 let worker = null;
@@ -99,7 +106,11 @@ const BOM = '﻿';
 async function detectMode() {
   const forced = new URLSearchParams(location.search).get('modus');
   if (forced === 'prozessor' || forced === 'cpu') return 'cpu';
-  if (state.settings.gpuBroken && forced !== 'grafikkarte') return 'cpu';
+  state.gpuDisabled = false;
+  if (state.settings.gpuBrokenBuild === BUILD && forced !== 'grafikkarte') {
+    state.gpuDisabled = true;
+    return 'cpu';
+  }
   try {
     if (!navigator.gpu) return 'cpu';
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
@@ -113,11 +124,12 @@ async function detectMode() {
 function modeText() {
   if (!state.mode) return 'Dieses Gerät wird geprüft …';
   if (state.mode === 'gpu') return 'Dieses Gerät: Die Grafikkarte wird genutzt. Das geht schneller.';
-  if (!state.isolated || state.threads === 1) {
-    return 'Dieses Gerät: Der Prozessor rechnet mit nur einem Kern. Das dauert deutlich länger. Tipp: Seite einmal neu laden.';
+  const gpuNote = state.gpuDisabled ? ' Die Grafikkarte hat hier zuletzt nicht funktioniert.' : '';
+  if (!state.isolated) {
+    return `Dieses Gerät: Der Prozessor rechnet mit nur einem Kern. Das dauert deutlich länger. Tipp: Seite einmal neu laden.${gpuNote}`;
   }
-  const t = state.threads ? ` (${state.threads} Kerne)` : '';
-  return `Dieses Gerät: Der Prozessor rechnet${t}. Das dauert länger als mit einer Grafikkarte.`;
+  const t = state.threads ? ` (${state.threads === 1 ? '1 Kern' : `${state.threads} Kerne`})` : '';
+  return `Dieses Gerät: Der Prozessor rechnet${t}. Das dauert länger als mit einer Grafikkarte.${gpuNote}`;
 }
 function modeChip() {
   if (state.mode === 'gpu') return '<span class="chip chip-ok">Grafikkarte wird genutzt</span>';
@@ -133,7 +145,7 @@ function browserSupported() {
 
 function getWorker() {
   if (worker) return worker;
-  worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+  worker = new Worker(new URL('./worker.js?v=__BUILD__', import.meta.url), { type: 'module' });
   worker.onmessage = (ev) => onWorkerMessage(ev.data);
   worker.onerror = (ev) => {
     ev.preventDefault?.();
@@ -144,14 +156,18 @@ function getWorker() {
 }
 
 function onWorkerCrash() {
+  const wasReady = state.workerReady;
   try { worker?.terminate(); } catch { /* egal */ }
   worker = null;
   state.whisperReady = false;
+  state.workerReady = false;
   const f = currentFile();
   if (state.running && f) {
     if (state.cancelRequested) { finishCancel(); return; }
     f.status = 'error';
-    f.error = 'Der Browser hatte nicht genug Arbeitsspeicher. Tipp: andere Tabs schließen, „Schnell“ wählen oder die Datei kürzen.';
+    f.error = wasReady
+      ? 'Der Browser hatte nicht genug Arbeitsspeicher. Tipp: andere Tabs schließen, „Schnell“ wählen oder die Datei kürzen.'
+      : 'Die Seite konnte nicht vollständig geladen werden. Bitte die Seite neu laden und erneut versuchen.';
     processNext();
   }
 }
@@ -160,7 +176,7 @@ function friendlyError(message) {
   if (/memory|allocation|out of memory|RangeError/i.test(message)) {
     return 'Nicht genug Arbeitsspeicher. Tipp: andere Tabs schließen, „Schnell“ wählen oder die Datei kürzen.';
   }
-  if (/fetch|network|Failed to load|404/i.test(message)) {
+  if (/fetch|network|Failed to load|Load failed|not found locally|Could not locate|ModelFileNotFound|\b40[34]\b|\b50\d\b/i.test(message)) {
     return 'Ein Teil des Sprachmodells konnte nicht geladen werden. Bitte Internetverbindung prüfen und Seite neu laden.';
   }
   return `Unerwarteter Fehler: ${message}`;
@@ -168,13 +184,16 @@ function friendlyError(message) {
 
 function onWorkerMessage(msg) {
   if (msg.type === 'hello') {
+    state.workerReady = true;
     state.threads = msg.threads;
     state.isolated = msg.isolated;
     renderModeInfo();
     return;
   }
+  // Nachrichten aus einem abgebrochenen oder alten Lauf ignorieren.
+  if (msg.run !== state.runId) return;
   const f = fileById(msg.id);
-  if (!f) return;
+  if (!f || f.status !== 'running') return;
   switch (msg.type) {
     case 'status':
       f.phase = msg.phase;
@@ -221,7 +240,8 @@ function onWorkerMessage(msg) {
       if (msg.gpu && state.mode === 'gpu') {
         // Grafikkarte hat nicht geklappt → dauerhaft auf Prozessor wechseln und dieselbe Datei neu starten.
         state.mode = 'cpu';
-        state.settings.gpuBroken = true;
+        state.gpuDisabled = true;
+        state.settings.gpuBrokenBuild = BUILD;
         saveSettings();
         state.whisperReady = false;
         f.status = 'waiting';
@@ -241,6 +261,7 @@ function onWorkerMessage(msg) {
 // ---------- Ablauf ----------
 
 async function decodeAudio(file) {
+  if (file.size === 0) throw new Error('leer');
   const buf = await file.arrayBuffer();
   const ctx = new OfflineAudioContext(1, 1, SAMPLE_RATE);
   const decoded = await ctx.decodeAudioData(buf);
@@ -263,6 +284,7 @@ function addFiles(list) {
       status: ok ? (state.running ? 'waiting' : 'ready') : 'error',
       error: ok ? null : 'Das ist keine Audio- oder Videodatei.',
       settings: { ...state.settings },
+      inRun: ok && state.running,
     };
     state.files.push(entry);
     added++;
@@ -280,6 +302,9 @@ function start() {
     f.error = null;
     f.notice = null;
   }
+  // Frühere Fehler gehören nicht zu diesem Lauf.
+  for (const f of state.files) f.inRun = f.status === 'waiting';
+  state.runId++;
   state.running = true;
   state.cancelRequested = false;
   state.step = 2;
@@ -291,6 +316,7 @@ function start() {
 
 async function processNext() {
   if (state.cancelRequested) { finishCancel(); return; }
+  const run = state.runId;
   const f = state.files.find((x) => x.status === 'waiting');
   if (!f) { finishAll(); return; }
   state.currentId = f.id;
@@ -305,11 +331,14 @@ async function processNext() {
   try {
     audio = await decodeAudio(f.file);
   } catch {
+    if (run !== state.runId || f.status !== 'running') return;
     f.status = 'error';
-    f.error = 'Diese Datei kann der Browser nicht lesen. Bitte als MP3 oder WAV speichern und erneut versuchen.';
+    f.error = 'Diese Datei kann der Browser nicht lesen oder sie enthält keine Tonspur. Tipp: als MP3 oder WAV speichern und erneut versuchen.';
     processNext();
     return;
   }
+  // Wurde während des Einlesens abgebrochen, gehört diese Datei nicht mehr zum aktuellen Lauf.
+  if (run !== state.runId || f.status !== 'running') return;
   if (state.cancelRequested) { finishCancel(); return; }
   f.duration = audio.length / SAMPLE_RATE;
   if (f.duration < 0.3) {
@@ -330,6 +359,7 @@ async function processNext() {
     diarize: s.diarize,
     numSpeakers: s.diarize && s.speakers !== 'auto' ? Number(s.speakers) : null,
     mode: state.mode,
+    run,
   }, [audio.buffer]);
 }
 
@@ -354,6 +384,10 @@ function finishAll() {
 function cancel() {
   if (!state.running || state.cancelRequested) return;
   state.cancelRequested = true;
+  // Wird die Datei gerade erst eingelesen, ist der Hintergrund-Thread noch nicht beteiligt:
+  // sofort abbrechen, das geladene Modell bleibt erhalten.
+  const f = currentFile();
+  if (!f || f.phase === 'decoding') { finishCancel(); return; }
   worker?.postMessage({ type: 'cancel' });
   renderProgress();
   clearTimeout(cancelTimer);
@@ -370,6 +404,7 @@ function cancel() {
 
 function finishCancel() {
   clearTimeout(cancelTimer);
+  state.runId++;
   for (const f of state.files) {
     if (f.status === 'waiting' || f.status === 'running') {
       f.status = 'ready';
@@ -446,6 +481,7 @@ function renderSteps() {
 
 function renderModeInfo() {
   $('mode-info').textContent = modeText();
+  $('retry-gpu').hidden = !(state.gpuDisabled && state.mode === 'cpu' && !state.running);
   if (state.step === 2) renderProgress();
 }
 
@@ -508,8 +544,8 @@ function renderProgress() {
   if (state.step === 3) { renderStillRunning(); return; }
   if (state.step !== 2) return;
   const f = currentFile();
-  const files = state.files.filter((x) => ['waiting', 'running', 'done', 'error'].includes(x.status) && x.settings);
-  const queue = state.files.filter((x) => x.status !== 'ready');
+  const files = state.files.filter((x) => x.inRun);
+  const queue = files;
   const idx = f ? queue.indexOf(f) + 1 : 0;
   let pct = f ? Math.round(f.progress * 100) : 0;
   let title = 'Wird vorbereitet …';
@@ -544,6 +580,9 @@ function renderProgress() {
   }
   const ring = document.querySelector('.ring');
   ring.classList.toggle('spin', spin);
+  if (spin) ring.removeAttribute('aria-valuenow');
+  else ring.setAttribute('aria-valuenow', String(pct));
+  ring.setAttribute('aria-valuetext', spin ? title : `${pct} Prozent`);
   $('ring-fg').setAttribute('stroke-dasharray', `${spin ? 90 : Math.round(3.644 * pct)} 365`);
   $('ring-label').textContent = spin ? '' : `${pct} %`;
   $('progress-title').textContent = title;
@@ -586,8 +625,18 @@ function viewOpts(f) {
   return { names: f.names, withSpeakers: f.result.speakers > 0 };
 }
 
+function renderFailed() {
+  const failed = state.files.filter((x) => x.status === 'error' && x.inRun);
+  const box = $('failed-box');
+  box.hidden = failed.length === 0;
+  if (!failed.length) return;
+  box.innerHTML = `<div><strong>${failed.length === 1 ? '1 Datei konnte' : `${failed.length} Dateien konnten`} nicht umgewandelt werden:</strong>
+    <ul class="plain-list">${failed.map((x) => `<li><strong>${esc(x.name)}</strong> – ${esc(x.error)}</li>`).join('')}</ul></div>`;
+}
+
 function renderResult() {
   renderStillRunning();
+  renderFailed();
   const f = currentView();
   if (!f) { state.step = state.running ? 2 : 1; render(); return; }
   state.viewId = f.id;
@@ -658,7 +707,8 @@ function renderSubtitles(f, withInputs = false) {
         </div>`).join('');
     }
   }
-  const cues = buildCues(f.result.segments, { names: f.names, withSpeakers: false });
+  // Gleiche Aufteilung wie in der SRT-Datei; der Name wird hier nur getrennt angezeigt.
+  const cues = buildCues(f.result.segments, { ...opts, labelInText: false });
   $('cues').innerHTML = cues.length ? cues.map((c, i) => `
     <article class="cue">
       <span class="cue-no">${i + 1}</span>
@@ -723,6 +773,12 @@ async function onAction(action, id) {
       break;
     case 'reset':
       resetAll();
+      break;
+    case 'retry-gpu':
+      state.settings.gpuBrokenBuild = null;
+      saveSettings();
+      state.mode = await detectMode();
+      renderModeInfo();
       break;
     case 'dl-srt':
       if (!f) return;

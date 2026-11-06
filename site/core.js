@@ -80,6 +80,82 @@ export function planChunks(audio, sr = SAMPLE_RATE, { maxSec = 29, minSec = 18 }
   return chunks;
 }
 
+/**
+ * Stille-Erkennung: Findet die Bereiche mit Ton und lässt längere Stille (≥ minGapSec) weg.
+ * Die Tonbereiche werden zu Stücken von höchstens maxSec Sekunden zusammengesetzt.
+ * Jedes Stück enthält eine Zuordnung zurück zur Originalzeit.
+ * @returns [{ parts: [{ src, len }], length }] – src/len in Samples
+ */
+export function planSpeechChunks(audio, levels, sr = SAMPLE_RATE, {
+  maxSec = 29, minGapSec = 2, padSec = 0.5, frameSec = 0.1,
+} = {}) {
+  const ref = speechLevel(levels);
+  const threshold = Math.max(0.002, ref * 0.05); // ca. 26 dB unter der Sprache
+  const minGap = Math.round(minGapSec / frameSec);
+  // 1. Tonbereiche in Abschnitten (100 ms)
+  const regions = [];
+  let start = -1, lastSpeech = -Infinity;
+  for (let f = 0; f < levels.length; f++) {
+    if (levels[f] < threshold) continue;
+    if (start < 0) start = f;
+    else if (f - lastSpeech > minGap) { regions.push([start, lastSpeech + 1]); start = f; }
+    lastSpeech = f;
+  }
+  if (start >= 0) regions.push([start, lastSpeech + 1]);
+  // 2. In Samples umrechnen, etwas Rand dazu, Überlappungen zusammenfassen
+  const pad = Math.round(padSec * sr);
+  const frame = Math.round(frameSec * sr);
+  const spans = [];
+  for (const [a, b] of regions) {
+    const s = Math.max(0, a * frame - pad);
+    const e = Math.min(audio.length, b * frame + pad);
+    if (spans.length && s <= spans.at(-1)[1]) spans.at(-1)[1] = Math.max(spans.at(-1)[1], e);
+    else spans.push([s, e]);
+  }
+  // 3. Zu Stücken ≤ maxSec packen; zu lange Bereiche an leisen Stellen teilen
+  const maxLen = Math.round(maxSec * sr);
+  const pieces = [];
+  for (const [s, e] of spans) {
+    if (e - s <= maxLen) pieces.push([s, e]);
+    else for (const [a, b] of planChunks(audio.subarray(s, e), sr, { maxSec })) pieces.push([s + a, s + b]);
+  }
+  const chunks = [];
+  let cur = null;
+  for (const [s, e] of pieces) {
+    const len = e - s;
+    if (!cur || cur.length + len > maxLen) {
+      cur = { parts: [], length: 0 };
+      chunks.push(cur);
+    }
+    cur.parts.push({ src: s, len });
+    cur.length += len;
+  }
+  return chunks;
+}
+
+/** Setzt die Tonbereiche eines Stücks zu einem Puffer zusammen. */
+export function assembleChunk(audio, chunk) {
+  if (chunk.parts.length === 1) {
+    const p = chunk.parts[0];
+    return audio.subarray(p.src, p.src + p.len);
+  }
+  const out = new Float32Array(chunk.length);
+  let o = 0;
+  for (const p of chunk.parts) { out.set(audio.subarray(p.src, p.src + p.len), o); o += p.len; }
+  return out;
+}
+
+/** Rechnet eine Zeit im zusammengesetzten Stück (Sekunden) in die Originalzeit um. */
+export function chunkTimeToSource(chunk, t, sr = SAMPLE_RATE) {
+  let pos = Math.max(0, Math.round(t * sr));
+  for (const p of chunk.parts) {
+    if (pos <= p.len) return (p.src + pos) / sr;
+    pos -= p.len;
+  }
+  const last = chunk.parts.at(-1);
+  return (last.src + last.len) / sr;
+}
+
 // ---------- Filter für erfundene Sätze ----------
 
 function normalize(text) {
@@ -249,11 +325,13 @@ export function speakerName(names, id) {
  * Baut Untertitel-Blöcke aus Whisper-Abschnitten: höchstens 2 Zeilen à 42 Zeichen,
  * lange Abschnitte werden aufgeteilt und die Zeit anteilig verteilt.
  */
-export function buildCues(segments, { names = null, withSpeakers = false, maxLine = 42 } = {}) {
+export function buildCues(segments, { names = null, withSpeakers = false, maxLine = 42, labelInText = true } = {}) {
   const cues = [];
   for (const seg of segments) {
-    const prefix = withSpeakers ? `${speakerName(names, seg.speaker ?? 0)}: ` : '';
-    const pieces = splitText(seg.text, maxLine * 2 - prefix.length);
+    const label = withSpeakers ? `${speakerName(names, seg.speaker ?? 0)}: ` : '';
+    // Die Aufteilung berücksichtigt den Namen immer, damit Ansicht und SRT-Datei gleich nummeriert sind.
+    const prefix = labelInText ? label : '';
+    const pieces = splitText(seg.text, Math.max(30, maxLine * 2 - label.length));
     const totalChars = pieces.reduce((n, p) => n + p.length, 0) || 1;
     const dur = Math.max(0.5, seg.end - seg.start);
     let t = seg.start;

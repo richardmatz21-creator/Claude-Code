@@ -86,7 +86,10 @@
           </select>
         </div>
       </div>
-      <p class="muted small" id="mode-info">Dieses Gerät wird geprüft …</p>
+      <div class="row">
+        <p class="muted small" id="mode-info">Dieses Gerät wird geprüft …</p>
+        <button type="button" class="btn-link small" data-action="retry-gpu" id="retry-gpu" hidden>Grafikkarte erneut versuchen</button>
+      </div>
     </section>
 
     <div class="row">
@@ -98,12 +101,12 @@
   <!-- Schritt 2: Umwandeln -->
   <section id="step2" class="stack" hidden aria-labelledby="progress-title">
     <section class="card progress-card">
-      <div class="ring" aria-hidden="true">
-        <svg width="140" height="140" viewBox="0 0 140 140">
+      <div class="ring" role="progressbar" aria-label="Fortschritt" aria-valuemin="0" aria-valuemax="100">
+        <svg width="140" height="140" viewBox="0 0 140 140" aria-hidden="true">
           <circle cx="70" cy="70" r="58" fill="none" class="ring-bg" stroke-width="12"/>
           <circle cx="70" cy="70" r="58" fill="none" class="ring-fg" stroke-width="12" stroke-linecap="round" stroke-dasharray="0 365" transform="rotate(-90 70 70)" id="ring-fg"/>
         </svg>
-        <span class="ring-label" id="ring-label">0 %</span>
+        <span class="ring-label" id="ring-label" aria-hidden="true">0 %</span>
       </div>
       <div class="stack-xs center">
         <h1 class="h1" id="progress-title">Wird vorbereitet …</h1>
@@ -133,6 +136,7 @@
   <!-- Schritt 3: Ergebnis -->
   <section id="step3" class="stack" hidden aria-labelledby="result-title">
     <div class="notice notice-info" id="still-running" hidden></div>
+    <div class="notice notice-warn" id="failed-box" role="alert" hidden></div>
 
     <nav class="file-chips" id="result-files" aria-label="Ergebnis für"></nav>
 
@@ -186,7 +190,7 @@
     <h2 class="h2" id="hilfe-title">So funktioniert es</h2>
     <ol class="plain-list">
       <li><strong>Dateien wählen:</strong> eine oder mehrere Audio- oder Videodateien hineinziehen oder auswählen.</li>
-      <li><strong>Umwandeln:</strong> Die Seite wandelt die Dateien nacheinander in Text um. Beim allerersten Mal wird das Sprachmodell einmalig geladen (ca. 250 MB bei „Ausgewogen“, ca. 80 MB bei „Schnell“), danach bleibt es im Browser gespeichert.</li>
+      <li><strong>Umwandeln:</strong> Die Seite wandelt die Dateien nacheinander in Text um. Beim allerersten Mal wird das Sprachmodell einmalig geladen (je nach Gerät ca. 280–360 MB bei „Ausgewogen“, ca. 100–120 MB bei „Schnell“; für die Sprecher-Erkennung zusätzlich ca. 33 MB). Danach bleibt es im Browser gespeichert.</li>
       <li><strong>Ergebnis:</strong> Text kopieren oder als TXT laden, Untertitel als SRT für Videoprogramme (z. B. CapCut, Premiere, DaVinci Resolve) laden.</li>
     </ol>
     <p class="muted">Tipps: Chrome oder Edge verwenden. Tab sichtbar lassen. „Sprecher erkennen“ funktioniert am besten, wenn sich die Personen nicht ins Wort fallen. Bei langen Aufnahmen kann die Zuordnung manchmal wechseln – die Namen lassen sich im Ergebnis ändern.</p>
@@ -204,10 +208,10 @@
     <ul class="plain-list small">
       <li>Spracherkennung: Whisper „small“ und „base“ von OpenAI (MIT-Lizenz), ONNX-Fassung von onnx-community</li>
       <li>Sprecherwechsel: pyannote segmentation-3.0 (MIT-Lizenz)</li>
-      <li>Stimm-Wiedererkennung: <a href="https://github.com/wenet-e2e/wespeaker" rel="noopener">WeSpeaker</a> ResNet34-LM, trainiert auf VoxCeleb, Lizenz <a href="https://creativecommons.org/licenses/by/4.0/deed.de" rel="noopener">CC BY 4.0</a>; ONNX-Fassung von onnx-community</li>
+      <li>Stimm-Wiedererkennung: <a href="https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM" rel="noopener">wespeaker-voxceleb-resnet34-LM</a> (WeSpeaker-Projekt, bereitgestellt von pyannote), trainiert auf VoxCeleb, Lizenz <a href="https://creativecommons.org/licenses/by/4.0/deed.de" rel="noopener">CC BY 4.0</a>. Änderung: ins ONNX-Format umgewandelt von onnx-community.</li>
       <li>Transformers.js von Hugging Face (Apache-2.0), ONNX Runtime Web von Microsoft (MIT), fflate (MIT), coi-serviceworker (MIT), Schrift Figtree (SIL Open Font License)</li>
     </ul>
-    <p class="small muted">Version __BUILD__</p>
+    <p class="small muted"><a href="licenses/LIZENZEN.txt">Alle Lizenztexte</a> · Version __BUILD__</p>
   </section>
 </main>
 

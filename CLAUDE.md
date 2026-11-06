@@ -25,8 +25,11 @@ Statische Website auf GitHub Pages (`https://richardmatz21-creator.github.io/Cla
 - Nicht enthalten: Mikrofon-Aufnahme, Word-Datei, Handy-Optimierung.
 
 ## Technische Stolperfallen (schon gelöst, nicht wieder einbauen)
-- transformers.js 4.3: `env.localModelPath` muss ein **Pfad** sein (`/Claude-Code/models/`), keine volle URL – sonst findet es lokale Dateien wie `preprocessor_config.json` nicht.
+- transformers.js 4.3: `env.localModelPath` muss ein **Pfad** sein (`/Claude-Code/a-…/models/`), keine volle URL – sonst findet es lokale Dateien wie `preprocessor_config.json` nicht.
 - ONNX-Runtime-WASM-Dateien explizit über `env.backends.onnx.wasm.wasmPaths` auf `vendor/` setzen, sonst lädt transformers.js sie von jsDelivr.
+- Versionierung: Bibliotheken und Modelle liegen unter `a-<hash>/` (Hash aus `models.json` + `package-lock.json`), eigene Dateien bekommen `?v=<Build>`. Platzhalter `__ASSETS__`/`__BUILD__` ersetzt `scripts/build.mjs`. transformers.js speichert Dateien dauerhaft in der Cache API; der Worker löscht Einträge alter `a-…`-Ordner.
+- Ladefehler meldet transformers.js als „file was not found locally“ – das ist ein Netzwerkproblem, kein Grafikkarten-Fehler. Die Grafikkarte wird nur nach echten GPU-Fehlern abgeschaltet, und nur bis zum nächsten Build.
+- Abbrechen: Jeder Lauf hat eine `runId`; Nachrichten und verspätete Dekodierungen aus alten Läufen werden ignoriert. Der Worker nimmt nur einen Auftrag gleichzeitig.
 - GPU-Modus: Encoder `fp16` auf WebGPU, Decoder `q8` auf WASM (die fp16-Encoder haben fp32-Ein-/Ausgänge, das passt). Ohne `shader-f16` → Prozessor-Modus.
 - `coi-serviceworker.min.js` muss im Hauptordner liegen (Mehrkern-WASM braucht COOP/COEP, GitHub Pages setzt keine Header). Erster Besuch lädt einmal neu.
 - Builds in Claude-Cloud-Sessions brauchen `NODE_USE_ENV_PROXY=1`; Hugging Face liefert große Dateien über `us.aws.cdn.hf.co`.

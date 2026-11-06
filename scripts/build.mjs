@@ -73,7 +73,16 @@ async function download(url, dest) {
   }
 }
 
-async function fetchModels() {
+// Versionskennung für Bibliotheken und Modelle: ändert sich, sobald sich Modelle oder Pakete ändern.
+// Dadurch bekommen Browser nach einem Update neue Adressen und mischen nie alte und neue Teile.
+async function assetsVersion() {
+  const hash = createHash('sha256');
+  hash.update(await readFile(join(ROOT, 'scripts', 'models.json')));
+  hash.update(await readFile(join(ROOT, 'package-lock.json')));
+  return 'a-' + hash.digest('hex').slice(0, 10);
+}
+
+async function fetchModels(assetsDir) {
   const { models } = JSON.parse(await readFile(join(ROOT, 'scripts', 'models.json'), 'utf8'));
   for (const model of models) {
     const remote = await listRepoFiles(model.id, model.revision);
@@ -94,15 +103,15 @@ async function fetchModels() {
         if (s.size !== meta.size) throw new Error(`${file}: falsche Größe ${s.size} statt ${meta.size}`);
         if (meta.sha256 && (await sha256(cached)) !== meta.sha256) throw new Error(`${file}: Prüfsumme stimmt nicht`);
       }
-      const target = join(DIST, 'models', model.id, file);
+      const target = join(assetsDir, 'models', model.id, file);
       await mkdir(dirname(target), { recursive: true });
       await cp(cached, target);
     }
   }
 }
 
-async function copyVendor() {
-  const vendor = join(DIST, 'vendor');
+async function copyVendor(assetsDir) {
+  const vendor = join(assetsDir, 'vendor');
   await mkdir(vendor, { recursive: true });
   const ortDist = join(NM, 'onnxruntime-web', 'dist');
   const files = [
@@ -127,6 +136,72 @@ async function copyVendor() {
   }
 }
 
+// Lizenztexte der mitgelieferten Software und Hinweise zu den Modellen.
+async function writeLicenses() {
+  const { models } = JSON.parse(await readFile(join(ROOT, 'scripts', 'models.json'), 'utf8'));
+  const parts = [
+    'Audio zu Text – Lizenzen der mitgelieferten Software und Modelle',
+    '='.repeat(64),
+    '',
+    'MODELLE',
+    ...models.map((m) => `- ${m.id} (Revision ${m.revision}) – ${m.license} – https://huggingface.co/${m.id}`),
+    '',
+    'Whisper: Copyright (c) 2022 OpenAI, MIT-Lizenz (https://github.com/openai/whisper/blob/main/LICENSE).',
+    'pyannote segmentation-3.0: Copyright (c) pyannote.audio contributors, MIT-Lizenz.',
+    'wespeaker-voxceleb-resnet34-LM: WeSpeaker-Projekt (https://github.com/wenet-e2e/wespeaker), bereitgestellt von pyannote',
+    '  (https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM), Lizenz CC BY 4.0',
+    '  (https://creativecommons.org/licenses/by/4.0/). Änderung: ins ONNX-Format umgewandelt von onnx-community.',
+    '',
+  ];
+  const libs = [
+    ['Transformers.js (@huggingface/transformers)', join(NM, '@huggingface', 'transformers', 'LICENSE')],
+    // Das npm-Paket enthält keine LICENSE-Datei; MIT-Text laut https://github.com/microsoft/onnxruntime/blob/main/LICENSE
+    ['ONNX Runtime Web (onnxruntime-web)', join(NM, 'onnxruntime-web', 'LICENSE'), `MIT License
+
+Copyright (c) Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.`],
+    ['fflate', join(NM, 'fflate', 'LICENSE')],
+    ['coi-serviceworker', join(NM, 'coi-serviceworker', 'LICENSE')],
+    ['Schrift Figtree (@fontsource/figtree)', join(NM, '@fontsource', 'figtree', 'LICENSE')],
+  ];
+  for (const [name, file, fallback] of libs) {
+    let text;
+    try { text = await readFile(file, 'utf8'); } catch { text = fallback ?? null; }
+    if (!text) throw new Error(`Lizenztext fehlt: ${file}`);
+    parts.push('', '-'.repeat(64), name, '-'.repeat(64), text.trim());
+  }
+  await mkdir(join(DIST, 'licenses'), { recursive: true });
+  await writeFile(join(DIST, 'licenses', 'LIZENZEN.txt'), parts.join('\n') + '\n');
+}
+
+// Platzhalter in den eigenen Dateien ersetzen (nicht in Bibliotheken und Modellen).
+async function replacePlaceholders(values) {
+  for (const entry of await readdir(DIST, { withFileTypes: true })) {
+    if (!entry.isFile() || !/\.(html|js|css)$/.test(entry.name)) continue;
+    const p = join(DIST, entry.name);
+    let text = await readFile(p, 'utf8');
+    for (const [key, value] of Object.entries(values)) text = text.replaceAll(key, value);
+    await writeFile(p, text);
+  }
+}
+
 async function dirSize(dir) {
   let total = 0;
   const files = [];
@@ -143,15 +218,16 @@ async function dirSize(dir) {
 async function main() {
   await rm(DIST, { recursive: true, force: true });
   await cp(join(ROOT, 'site'), DIST, { recursive: true });
-  await copyVendor();
-  if (!skipModels) await fetchModels();
+  const assets = await assetsVersion();
+  const assetsDir = join(DIST, assets);
+  await copyVendor(assetsDir);
+  await writeLicenses();
+  if (!skipModels) await fetchModels(assetsDir);
 
   // Build-Kennung, damit Browser nach Updates die neue Version laden.
   const buildId = process.env.GITHUB_SHA?.slice(0, 7) ?? new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-  for (const f of ['index.html']) {
-    const p = join(DIST, f);
-    await writeFile(p, (await readFile(p, 'utf8')).replaceAll('__BUILD__', buildId));
-  }
+  await replacePlaceholders({ __BUILD__: buildId, __ASSETS__: assets });
+  log(`Version ${buildId}, Bibliotheken und Modelle unter ${assets}/`);
 
   const { total, files } = await dirSize(DIST);
   files.sort((a, b) => b[1] - a[1]);

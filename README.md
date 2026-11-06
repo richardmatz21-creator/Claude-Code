@@ -17,7 +17,7 @@ Eine Website, die Audio- und Videodateien mit [Whisper](https://github.com/opena
 
 ## Benutzen
 
-Seite in **Chrome oder Edge** öffnen, Dateien hineinziehen, „Umwandeln starten“. Beim allerersten Mal wird das Sprachmodell einmalig geladen (ca. 250 MB bei „Ausgewogen“, ca. 80 MB bei „Schnell“) und danach im Browser gespeichert. Während der Umwandlung den Tab sichtbar lassen.
+Seite in **Chrome oder Edge** öffnen, Dateien hineinziehen, „Umwandeln starten“. Beim allerersten Mal wird das Sprachmodell einmalig geladen und danach im Browser gespeichert (siehe Tabelle unten). Während der Umwandlung den Tab sichtbar lassen.
 
 Mit `?modus=prozessor` an der Adresse lässt sich der Prozessor-Modus erzwingen (zur Fehlersuche).
 
@@ -59,3 +59,14 @@ Hinter einem Proxy braucht der Build `NODE_USE_ENV_PROXY=1`.
 | Whisper small / base (onnx-community) | Spracherkennung | MIT |
 | pyannote segmentation-3.0 (onnx-community) | Sprecherwechsel finden | MIT |
 | WeSpeaker ResNet34-LM (onnx-community) | Stimmen wiedererkennen | CC BY 4.0 (Namensnennung auf der Seite) |
+
+### Download-Größen beim ersten Besuch (danach im Browser gespeichert)
+
+| Qualität | Grafikkarte (fp16-Encoder + q8-Decoder) | Prozessor (q8-Encoder + q8-Decoder) |
+|---|---|---|
+| Ausgewogen (small) | 177 + 157 MB | 92 + 157 MB |
+| Schnell (base) | 41 + 54 MB | 23 + 54 MB |
+| Rechenmodul (ONNX Runtime WASM), immer | 27 MB | 27 MB |
+| Sprecher-Erkennung (nur wenn eingeschaltet) | 6 + 27 MB | 6 + 27 MB |
+
+Ausgeliefert werden alle Varianten (zusammen ca. 610 MB von erlaubten 1 GB); jeder Browser lädt nur, was er braucht.

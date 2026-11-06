@@ -24,6 +24,14 @@ const server = await startServer(PORT);
 const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
 const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1280, height: 900 } });
 const page = await context.newPage();
+// Für den Abbruch-Test lässt sich das Einlesen künstlich verlangsamen (wie bei großen Dateien auf schwachen Laptops).
+await page.addInitScript(() => {
+  const orig = OfflineAudioContext.prototype.decodeAudioData;
+  OfflineAudioContext.prototype.decodeAudioData = async function (...args) {
+    if (self.__slowDecode) await new Promise((r) => setTimeout(r, 6000));
+    return orig.apply(this, args);
+  };
+});
 const foreign = [];
 const failures = [];
 page.on('request', (r) => {
@@ -32,6 +40,8 @@ page.on('request', (r) => {
 });
 page.on('response', (r) => { if (r.status() >= 400) failures.push(`${r.status()} ${r.url()}`); });
 page.on('pageerror', (e) => console.log('[Seitenfehler]', e.message));
+// Rückfragen („Ergebnisse verwerfen?“) immer bestätigen.
+page.on('dialog', (d) => d.accept().catch(() => {}));
 page.on('console', (m) => { if (m.type() === 'error') console.log('[Konsole]', m.text().slice(0, 500)); });
 
 async function shot(name) {
@@ -66,7 +76,7 @@ try {
     await page.waitForFunction(() => self.crossOriginIsolated === true, null, { timeout: 30000 });
     await page.waitForFunction(() => /Kerne|Kern\.|Grafikkarte wird/.test(document.getElementById('mode-info').textContent), null, { timeout: 30000 });
     const mode = await page.textContent('#mode-info');
-    assert.match(mode, /Prozessor rechnet \(\d+ Kerne\)/, mode);
+    assert.match(mode, /Prozessor rechnet \((\d+ Kerne|1 Kern)\)/, mode);
     await shot('1-start');
   });
 
@@ -151,7 +161,6 @@ try {
   });
 
   await step('Abbrechen bringt zurück zu Schritt 1', async () => {
-    page.once('dialog', (d) => d.accept());
     await page.click('[data-action="reset"]');
     await page.waitForSelector('#step1:not([hidden])');
     await page.selectOption('#set-model', 'base');
@@ -172,6 +181,39 @@ try {
     results.schnellSekunden = (Date.now() - t0) / 1000;
     assert.match(await page.textContent('#transcript'), /Morgen/);
     assert.doesNotMatch(await page.textContent('#result-sub'), /Sprecher/);
+  });
+
+  await step('Abbrechen während langsamem Einlesen: kein heimlicher Weiterlauf', async () => {
+    await page.click('[data-action="reset"]');
+    await page.waitForSelector('#step1:not([hidden])');
+    await page.setInputFiles('#file-input', [join(FIX, 'gespraech.mp3')]);
+    await page.evaluate(() => { self.__slowDecode = true; });
+    await page.click('#start-btn');
+    await page.waitForSelector('#step2:not([hidden])');
+    await page.click('#cancel-btn');
+    await page.waitForSelector('#step1:not([hidden])', { timeout: 10000 });
+    await page.evaluate(() => { self.__slowDecode = false; });
+    // Nach dem Abbruch darf die Seite nicht von selbst zum Ergebnis springen.
+    await page.waitForTimeout(20000);
+    assert.equal(await page.isVisible('#step1'), true, 'Seite ist ungefragt weitergesprungen');
+    assert.match(await page.textContent('#file-list'), /Abgebrochen/);
+  });
+
+  await step('Fehlerhafte Datei wird im Ergebnis gemeldet', async () => {
+    await page.setInputFiles('#file-input', [{ name: 'kaputt.mp3', mimeType: 'audio/mpeg', buffer: Buffer.from('das ist kein Ton') }]);
+    await page.click('#start-btn');
+    await page.waitForSelector('#step3:not([hidden])', { timeout: TIMEOUT });
+    const box = await page.textContent('#failed-box');
+    assert.match(box, /kaputt\.mp3/);
+    assert.match(box, /nicht lesen/);
+    assert.match(await page.textContent('#transcript'), /Morgen/);
+  });
+
+  await step('Lizenztexte werden mitgeliefert', async () => {
+    const res = await page.request.get(`${ORIGIN}/licenses/LIZENZEN.txt`);
+    assert.equal(res.status(), 200);
+    const text = await res.text();
+    for (const w of ['CC BY 4.0', 'Microsoft Corporation', 'Apache', 'fflate', 'Open Font License']) assert.ok(text.includes(w), `fehlt: ${w}`);
   });
 
   await step('Keine Anfragen an fremde Server, keine fehlenden Dateien', async () => {

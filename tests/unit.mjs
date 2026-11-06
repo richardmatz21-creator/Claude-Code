@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   planChunks, frameLevels, speechLevel, isQuiet, filterHallucinations, formatSrtTime,
   splitText, wrapLines, buildCues, toSrt, toTxt, clusterSpeakers, assignSpeakers,
-  speakerTimeline, baseName, SAMPLE_RATE,
+  speakerTimeline, baseName, SAMPLE_RATE, planSpeechChunks, assembleChunk, chunkTimeToSource,
 } from '../site/core.js';
 
 let failed = 0;
@@ -45,6 +45,33 @@ test('planChunks: Dauerton ohne Pause wird trotzdem geteilt', () => {
   const chunks = planChunks(tone(100));
   assert.ok(chunks.length >= 4);
   for (const [a, b] of chunks) assert.ok(b - a <= 29 * SAMPLE_RATE + 1);
+});
+
+test('planSpeechChunks lässt lange Stille weg und packt Ton zusammen', () => {
+  const sil = (sec) => new Float32Array(Math.round(sec * SAMPLE_RATE));
+  const audio = concat(sil(10), tone(3), sil(1), tone(3), sil(8), tone(4), sil(20));
+  const chunks = planSpeechChunks(audio, frameLevels(audio));
+  assert.equal(chunks.length, 1, 'alles passt in ein Stück');
+  const c = chunks[0];
+  const sec = c.length / SAMPLE_RATE;
+  assert.ok(sec > 10 && sec < 13.5, `Stück ${sec} s – Stille hätte entfernt werden sollen`);
+  assert.equal(c.parts.length, 2, 'kurze Pause (1 s) bleibt drin, lange Pause (8 s) nicht');
+  assert.equal(assembleChunk(audio, c).length, c.length);
+  // Zeit im Stück → Originalzeit: Anfang ≈ 9,5 s (10 s Stille minus 0,5 s Rand)
+  assert.ok(Math.abs(chunkTimeToSource(c, 0) - 9.5) < 0.15, String(chunkTimeToSource(c, 0)));
+  const firstLen = c.parts[0].len / SAMPLE_RATE;
+  assert.ok(chunkTimeToSource(c, firstLen + 1) > 25, 'Zeit im zweiten Teil liegt nach der langen Pause');
+});
+
+test('planSpeechChunks: nur Stille → keine Stücke, langer Ton → Stücke ≤ 29 s', () => {
+  const silent = new Float32Array(30 * SAMPLE_RATE);
+  assert.deepEqual(planSpeechChunks(silent, frameLevels(silent)), []);
+  const long = tone(95);
+  const chunks = planSpeechChunks(long, frameLevels(long));
+  assert.ok(chunks.length >= 4);
+  let total = 0;
+  for (const c of chunks) { assert.ok(c.length <= 29 * SAMPLE_RATE + 1); total += c.length; }
+  assert.equal(total, long.length, 'kein Ton geht verloren');
 });
 
 test('isQuiet erkennt Stille', () => {
@@ -128,6 +155,16 @@ test('buildCues: keine Überlappung, Mindestdauer, Sprecher-Präfix', () => {
   assert.ok(cues[1].text.startsWith('Sprecher 2: '));
   for (let i = 0; i + 1 < cues.length; i++) assert.ok(cues[i].end <= cues[i + 1].start + 1e-9);
   for (const c of cues) assert.ok(c.text.length <= 84, c.text);
+});
+
+test('buildCues: Ansicht ohne Namen im Text hat dieselbe Aufteilung wie die SRT', () => {
+  const segs = [{ start: 0, end: 9, text: 'Am wichtigsten ist uns, dass die Termine früher feststehen, damit wir planen können.', speaker: 0 }];
+  const opts = { withSpeakers: true, names: ['Richard Mustermann-Langname'] };
+  const srtCues = buildCues(segs, opts);
+  const viewCues = buildCues(segs, { ...opts, labelInText: false });
+  assert.equal(viewCues.length, srtCues.length);
+  assert.ok(!viewCues[0].text.startsWith('Richard'));
+  assert.ok(srtCues[0].text.startsWith('Richard Mustermann-Langname: '));
 });
 
 test('toSrt erzeugt gültiges Format', () => {
