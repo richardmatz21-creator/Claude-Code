@@ -56,6 +56,7 @@ const state = {
   correcting: null,    // Nummer des Abschnitts im Korrektur-Modus, sonst null
   renderedFileId: null,
   subsDirty: false,
+  searchOpen: false,
 };
 let nextId = 1;
 let worker = null;
@@ -676,7 +677,8 @@ function renderResult() {
   renderUnsaved(f);
   renderTabs();
   // Nicht neu zeichnen, während jemand im Text tippt (z. B. wenn nebenbei eine andere Datei fertig wird).
-  const typing = $('transcript').contains(document.activeElement) || document.activeElement === $('corr-text');
+  const typing = $('transcript').contains(document.activeElement) || $('names').contains(document.activeElement)
+    || document.activeElement === $('corr-text');
   if (!typing || state.renderedFileId !== f.id) {
     renderTranscript(f);
     renderSubtitles(f, true);
@@ -698,6 +700,8 @@ function renderTabs() {
   const correcting = state.correcting !== null;
   document.querySelector('.tabs').hidden = correcting;
   $('edit-bar').hidden = correcting;
+  // Suchen & Ersetzen gilt für die Text-Ansicht; im Korrektur-Modus ausgeblendet.
+  $('search-bar').hidden = correcting || !state.searchOpen;
   if (correcting) {
     $('panel-text').hidden = true;
     $('panel-subs').hidden = true;
@@ -752,7 +756,7 @@ function showSegTools(f, index) {
   tools.className = 'seg-tools';
   tools.contentEditable = 'false';
   tools.innerHTML = `<button type="button" class="tool-btn" data-action="seg-play" aria-label="${playing ? 'Abspielen stoppen' : `Abschnitt ${index + 1} anhören`}">${playing ? STOP_ICON + 'Stopp' : PLAY_ICON + 'Anhören'}</button>`
-    + (isEdited(seg) ? '<button type="button" class="tool-btn" data-action="seg-reset">Original</button>' : '');
+    + (isEdited(seg) ? `<button type="button" class="tool-btn" data-action="seg-reset" aria-label="Abschnitt ${index + 1}: Original wiederherstellen">Original wiederherstellen</button>` : '');
   span.after(tools);
 }
 
@@ -760,13 +764,14 @@ function onSegmentEdited(f, index, text) {
   const seg = f.result.segments[index];
   seg.text = text.replace(/[\r\n]+/g, ' ');
   f.unsaved = true;
+  f.modified = true;
   state.subsDirty = true;
   renderUnsaved(f);
   updateSearch(false);
 }
 
 function renderUnsaved(f) {
-  $('unsaved-hint').hidden = !(f.unsaved && f.result.segments.some(isEdited));
+  $('unsaved-hint').hidden = !(f.unsaved && f.modified);
 }
 
 // ---------- Korrektur-Modus: Abschnitt für Abschnitt ----------
@@ -829,7 +834,11 @@ function stopCorrecting(f) {
   renderTranscript(f);
   if (state.subsDirty) { renderSubtitles(f, false); state.subsDirty = false; }
   renderCorrect(f);
-  segSpan(last)?.scrollIntoView({ block: 'center' });
+  const span = segSpan(last);
+  if (span) {
+    span.scrollIntoView({ block: 'center' });
+    span.focus();
+  }
 }
 
 // ---------- Anhören ----------
@@ -1052,8 +1061,6 @@ async function onAction(action, id) {
       if (!f) return;
       if (await copyText(txtFor(f))) {
         $('copy-status').textContent = 'Text kopiert.';
-        f.unsaved = false;
-        renderUnsaved(f);
       } else {
         $('copy-status').textContent = 'Kopieren hat nicht geklappt. Bitte „Text (TXT)“ verwenden.';
       }
@@ -1096,20 +1103,25 @@ async function onAction(action, id) {
       break;
     }
     case 'search-toggle': {
-      const bar = $('search-bar');
-      bar.hidden = !bar.hidden;
-      $('search-toggle').setAttribute('aria-expanded', String(!bar.hidden));
-      if (!bar.hidden) $('search-q').focus();
+      state.searchOpen = !state.searchOpen;
+      $('search-bar').hidden = !state.searchOpen;
+      $('search-toggle').setAttribute('aria-expanded', String(state.searchOpen));
+      if (state.searchOpen) $('search-q').focus();
       updateSearch();
       break;
     }
     case 'replace-all': {
       if (!f) return;
       const q = $('search-q').value;
-      f.undo = f.result.segments.map((s) => s.text);
+      const before = f.result.segments.map((s) => s.text);
       const n = replaceAll(f.result.segments, q, $('search-r').value);
-      if (!n) { f.undo = null; return; }
+      if (!n) return;
+      // Pro Abschnitt Vorher/Nachher merken: Rückgängig betrifft nur Abschnitte, die seitdem niemand angefasst hat.
+      f.undo = f.result.segments
+        .map((s, index) => ({ index, before: before[index], after: s.text }))
+        .filter((u) => u.before !== u.after);
       f.unsaved = true;
+      f.modified = true;
       renderTranscript(f);
       renderSubtitles(f, false);
       renderUnsaved(f);
@@ -1120,7 +1132,12 @@ async function onAction(action, id) {
     }
     case 'replace-undo': {
       if (!f || !f.undo) return;
-      f.result.segments.forEach((s, i) => { s.text = f.undo[i]; });
+      let kept = 0;
+      for (const u of f.undo) {
+        const seg = f.result.segments[u.index];
+        if (seg.text === u.after) seg.text = u.before;
+        else kept++;
+      }
       f.undo = null;
       f.unsaved = true;
       renderTranscript(f);
@@ -1128,7 +1145,9 @@ async function onAction(action, id) {
       renderUnsaved(f);
       $('replace-undo').hidden = true;
       updateSearch();
-      $('search-count').textContent = 'Ersetzen rückgängig gemacht.';
+      $('search-count').textContent = kept
+        ? `Ersetzen rückgängig gemacht. ${kept === 1 ? '1 Abschnitt hattest' : `${kept} Abschnitte hattest`} du danach von Hand geändert – ${kept === 1 ? 'der bleibt' : 'die bleiben'} so.`
+        : 'Ersetzen rückgängig gemacht.';
       break;
     }
   }
@@ -1283,6 +1302,9 @@ function bind() {
     const f = currentView();
     if (!f) return;
     f.names[Number(i)] = e.target.value;
+    f.unsaved = true;
+    f.modified = true;
+    renderUnsaved(f);
     renderTranscript(f);
     renderSubtitles(f, false);
   });

@@ -421,7 +421,11 @@ export function replaceAll(segments, query, replacement) {
   if (!query) return 0;
   let count = 0;
   for (const s of segments) {
-    s.text = s.text.replace(searchRegExp(query), () => { count++; return replacement; });
+    let hits = 0;
+    const text = s.text.replace(searchRegExp(query), () => { hits++; return replacement; });
+    // Doppelte Leerzeichen aufräumen (z. B. beim Ersetzen durch leeren Text).
+    if (hits) s.text = text.replace(/ {2,}/g, ' ').replace(/ ([,.!?;:])/g, '$1').trim();
+    count += hits;
   }
   return count;
 }

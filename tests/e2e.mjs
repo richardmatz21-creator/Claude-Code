@@ -214,10 +214,24 @@ try {
     await page.waitForFunction(() => document.getElementById('search-count').textContent.includes('2 Stellen ersetzt'));
     const replaced = await page.textContent('#transcript');
     assert.equal((replaced.match(/reden wir/g) ?? []).length, 2);
+    // Danach von Hand weiterkorrigieren: Rückgängig darf diese Korrektur nicht verwerfen.
+    await page.click('#transcript .seg[data-seg="0"]');
+    await page.keyboard.press('End');
+    await page.keyboard.type(' Handkorrektur');
     await page.click('#replace-undo');
     const back = await page.textContent('#transcript');
-    assert.equal((back.match(/sprechen wir/g) ?? []).length, 2);
-    assert.equal(back.includes('reden wir'), false);
+    assert.match(back, /Handkorrektur/, 'Handkorrektur wurde verworfen');
+    assert.match(await page.textContent('#transcript .seg[data-seg="3"]'), /sprechen wir/, 'unberührter Abschnitt nicht zurückgesetzt');
+    assert.match(await page.textContent('#search-count'), /von Hand geändert/);
+    // Handkorrektur wieder entfernen, damit die folgenden Schritte vom bekannten Text ausgehen.
+    await page.click('#transcript .seg[data-seg="0"]');
+    await page.click('#seg-tools [data-action="seg-reset"]');
+    // Im Korrektur-Modus ist die Suchleiste ausgeblendet und erscheint danach wieder.
+    await page.click('[data-action="corr-start"]');
+    assert.equal(await page.isVisible('#search-bar'), false);
+    await page.click('[data-action="corr-done"]');
+    assert.equal(await page.isVisible('#search-bar'), true);
+    assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('seg')), true, 'Fokus nach Korrektur-Ende');
     await page.click('[data-action="search-toggle"]');
   });
 

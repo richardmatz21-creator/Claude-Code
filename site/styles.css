@@ -284,3 +284,5 @@ kbd { font: inherit; font-size: 13px; padding: 1px 6px; border: 1px solid var(--
 .check { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; font-size: 15px; cursor: pointer; }
 .check input { width: 20px; height: 20px; accent-color: var(--accent); }
 .unsaved-hint { margin: 0; color: var(--tip-ink); background: var(--tip-bg); border-radius: 10px; padding: 8px 12px; }
+.skip-inline { position: absolute; left: -9999px; }
+.skip-inline:focus { position: static; align-self: flex-start; font-weight: 700; }

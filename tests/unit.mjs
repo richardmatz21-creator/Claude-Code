@@ -233,6 +233,9 @@ test('Suchen und Ersetzen: ohne Groß-/Kleinschreibung, Sonderzeichen wörtlich'
   replaceAll(segs, '5$', '$& 10 €');
   assert.ok(segs[1].text.includes('$& 10 €'), 'Ersetzung wird wörtlich eingesetzt');
   assert.equal(countMatches([{ text: 'Über über ÜBER' }], 'über'), 3);
+  const empty = [{ text: 'Ich ähm bin da ähm.' }];
+  replaceAll(empty, 'ähm', '');
+  assert.equal(empty[0].text, 'Ich bin da.', 'keine doppelten Leerzeichen nach Ersetzen durch leer');
 });
 
 test('clusterSpeakers trennt zwei Stimmen und hält feste Anzahl ein', () => {
