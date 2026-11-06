@@ -598,7 +598,7 @@ export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration
 
   // Ein kurzer Einwurf einer anderen Stimme („Ja.“) direkt nach einem langen Beitrag fällt weg –
   // der lange Beitrag bleibt ein OT; spricht dieselbe Person danach weiter, wird es ein OT.
-  for (let k = turns.length - 1; k >= 1; k--) {
+  for (let k = 1; k < turns.length;) {
     const t = turns[k], p = turns[k - 1];
     if (isInterjection(t) && p.speaker !== t.speaker && p.end - p.start >= longTurn && t.start - p.end < offGap) {
       turns.splice(k, 1);
@@ -608,7 +608,9 @@ export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration
         p.texts.push(...n.texts);
         turns.splice(k, 1);
       }
+      continue; // dieselbe Stelle erneut prüfen (mehrere Einwürfe hintereinander)
     }
+    k++;
   }
 
   // 2. Beiträge ohne längere Pause bilden eine Strecke; zwischen Strecken liegt ein OFF

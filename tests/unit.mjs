@@ -292,6 +292,15 @@ test('Textgerüst: kurzer Einwurf – nach langem OT fällt er weg, nach kurzem 
   assert.deepEqual(b1[0].speakers, [0]);
   assert.ok(!/Ja\./.test(b1[0].full), b1[0].full);
   assert.match(b1[0].full, /Kühe\.$/);
+  // Mehrere Einwürfe in einem langen Monolog teilen ihn nicht
+  const mehrfach = [
+    { start: 0, end: 20, text: 'Ich erzähle jetzt ganz ausführlich, wie mein Tag auf dem Hof beginnt und was alles anfällt.', speaker: 0 },
+    { start: 20.2, end: 21, text: 'Ja.', speaker: 1 },
+    { start: 21.2, end: 26, text: 'Dann geht es in den Stall.', speaker: 0 },
+    { start: 26.2, end: 27, text: 'Genau.', speaker: 1 },
+    { start: 27.2, end: 47, text: 'Danach fahre ich mit dem Traktor auf das Feld und bleibe dort bis zum Mittagessen.', speaker: 0 },
+  ];
+  assert.deepEqual(buildScriptBlocks(mehrfach, { duration: 47 }).map((b) => b.type), ['OT']);
   const kurz = [
     { start: 0, end: 4, text: 'Hier ist der neue Stall.', speaker: 0 },
     { start: 4.2, end: 5, text: 'Super!', speaker: 1 },
