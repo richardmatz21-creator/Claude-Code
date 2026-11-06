@@ -2,6 +2,7 @@
 import {
   SAMPLE_RATE, toSrt, toTxt, buildCues, speakerTimeline, formatClock, formatSrtTime,
   baseName, speakerName, groupParagraphs, activeSegments, findMatches, countMatches, replaceAll,
+  buildScriptBlocks, shortenText, wordFrequencies, scriptDocxFiles, titleFromFileName, formatTimecode,
 } from './core.js?v=__BUILD__';
 import { zipSync, strToU8 } from './__ASSETS__/vendor/fflate.js';
 
@@ -18,6 +19,20 @@ const LANG = {
 const QUALITY = { small: 'Ausgewogen', base: 'Schnell' };
 const SETTINGS_KEY = 'audio-zu-text:einstellungen';
 const DIAR_SHARE = 0.12; // Anteil der Sprecher-Erkennung am Gesamtfortschritt
+// Kürzungsstufen im Textgerüst: Anteil der Wörter, der ungefähr stehen bleibt.
+// groupSize/maxGroups: Länge und Anzahl der Schlagwort-Gruppen in der Mitte.
+const SCRIPT_LEVELS = {
+  1: { ratio: 0.12, groupSize: 2, maxGroups: 2, text: 'sehr stark' },
+  2: { ratio: 0.22, groupSize: 2, maxGroups: 3, text: 'stark (wie in den Beispielen)' },
+  3: { ratio: 0.32, groupSize: 3, maxGroups: 5, text: 'mittel' },
+  4: { ratio: 0.45, groupSize: 3, maxGroups: 8, text: 'leicht' },
+  5: { ratio: 0.6, groupSize: 4, maxGroups: 12, text: 'sehr leicht' },
+};
+const shortOpts = (f) => {
+  const { ratio, groupSize, maxGroups } = SCRIPT_LEVELS[f.script.level];
+  return { ratio, groupSize, maxGroups, freq: f.script.freq };
+};
+const LONG_TURN = 8; // ab so vielen Sekunden am Stück ist ein Beitrag ein eigenes OT
 
 // ---------- Zustand ----------
 
@@ -234,9 +249,13 @@ function onWorkerMessage(msg) {
       // Originaltext merken, damit Korrekturen markiert und zurückgesetzt werden können.
       for (const seg of msg.segments) seg.orig = seg.text;
       f.result = { segments: msg.segments, removed: msg.removed, speakers: msg.speakers };
+      f.levels = msg.levels ?? null; // Lautstärke je 100 ms, für die Pausen im Textgerüst
       f.elapsed = msg.seconds;
       f.names = [];
-      f.unsaved = true;
+      f.unsaved = true;          // Text/Untertitel noch nicht heruntergeladen
+      f.unsavedScript = false;   // Textgerüst-Änderungen noch nicht heruntergeladen
+      f.editVersion = 0; // steigt bei jeder Text- oder Namensänderung (für das Textgerüst)
+      f.script = null;
       state.loadInfo = null;
       processNext();
       return;
@@ -431,7 +450,7 @@ function finishCancel() {
 }
 
 function resetAll() {
-  const unsaved = doneFiles().some((f) => f.unsaved);
+  const unsaved = doneFiles().some((f) => f.unsaved || f.unsavedScript);
   if (unsaved && !confirm('Die bisherigen Ergebnisse und Korrekturen werden verworfen. Hast du alles heruntergeladen, was du brauchst?')) return;
   stopPlayback();
   for (const f of state.files) {
@@ -465,7 +484,7 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('beforeunload', (e) => {
   // Die Seite speichert nichts: warnen, solange umgewandelt wird oder Ergebnisse/Korrekturen nicht heruntergeladen sind.
-  if (state.running || doneFiles().some((f) => f.unsaved)) { e.preventDefault(); e.returnValue = ''; }
+  if (state.running || doneFiles().some((f) => f.unsaved || f.unsavedScript)) { e.preventDefault(); e.returnValue = ''; }
 });
 
 // ---------- Darstellung ----------
@@ -685,6 +704,8 @@ function renderResult() {
   }
   renderCorrect(f);
   updateSearch();
+  const editingScript = $('panel-script').contains(document.activeElement);
+  if (state.tab === 'script' && (!editingScript || state.renderedFileId !== f.id)) renderScript(f);
   state.renderedFileId = f.id;
   const note = $('removed-note');
   note.hidden = !f.result.removed;
@@ -695,24 +716,29 @@ function renderResult() {
     <button type="button" class="btn btn-dashed" data-action="reset">Neue Dateien umwandeln</button>`;
 }
 
+const TABS = ['text', 'subs', 'script'];
+
 function renderTabs() {
-  const text = state.tab === 'text';
   const correcting = state.correcting !== null;
   document.querySelector('.tabs').hidden = correcting;
-  $('edit-bar').hidden = correcting;
-  // Suchen & Ersetzen gilt für die Text-Ansicht; im Korrektur-Modus ausgeblendet.
-  $('search-bar').hidden = correcting || !state.searchOpen;
-  if (correcting) {
-    $('panel-text').hidden = true;
-    $('panel-subs').hidden = true;
-    return;
+  $('edit-bar').hidden = correcting || state.tab === 'script';
+  // Suchen & Ersetzen gilt für die Text-Ansicht; im Korrektur-Modus und im Textgerüst ausgeblendet.
+  $('search-bar').hidden = correcting || !state.searchOpen || state.tab === 'script';
+  for (const t of TABS) {
+    const active = !correcting && state.tab === t;
+    $(`tab-${t}`).setAttribute('aria-selected', String(state.tab === t));
+    $(`tab-${t}`).tabIndex = state.tab === t ? 0 : -1;
+    $(`panel-${t}`).hidden = !active;
   }
-  $('tab-text').setAttribute('aria-selected', String(text));
-  $('tab-subs').setAttribute('aria-selected', String(!text));
-  $('tab-text').tabIndex = text ? 0 : -1;
-  $('tab-subs').tabIndex = text ? -1 : 0;
-  $('panel-text').hidden = !text;
-  $('panel-subs').hidden = text;
+}
+
+function selectTab(tab, focus = false) {
+  state.tab = tab;
+  const f = currentView();
+  if (f && tab === 'subs' && state.subsDirty) { renderSubtitles(f, false); state.subsDirty = false; }
+  if (f && tab === 'script') renderScript(f);
+  renderTabs();
+  if (focus) $(`tab-${tab}`).focus();
 }
 
 const PLAY_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>';
@@ -765,13 +791,14 @@ function onSegmentEdited(f, index, text) {
   seg.text = text.replace(/[\r\n]+/g, ' ');
   f.unsaved = true;
   f.modified = true;
+  f.editVersion++;
   state.subsDirty = true;
   renderUnsaved(f);
   updateSearch(false);
 }
 
 function renderUnsaved(f) {
-  $('unsaved-hint').hidden = !(f.unsaved && f.modified);
+  $('unsaved-hint').hidden = !((f.unsaved && f.modified) || f.unsavedScript);
 }
 
 // ---------- Korrektur-Modus: Abschnitt für Abschnitt ----------
@@ -841,24 +868,111 @@ function stopCorrecting(f) {
   }
 }
 
+// ---------- Textgerüst ----------
+
+function blockName(f, speakers) {
+  if (!f.result.speakers) return '';
+  return speakers.map((s) => speakerName(f.names, s)).join(' & ');
+}
+
+function generateScript(f, { keepSettings = false } = {}) {
+  const prev = f.script;
+  const offGap = keepSettings && prev ? prev.offGap : 3;
+  const level = keepSettings && prev ? prev.level : 2;
+  const title = prev?.title ?? titleFromFileName(f.name);
+  const freq = wordFrequencies(activeSegments(f.result.segments).map((s) => s.text));
+  const blocks = buildScriptBlocks(f.result.segments, { offGap, longTurn: LONG_TURN, duration: f.duration, levels: f.levels })
+    .map((b) => ({
+      ...b,
+      name: b.type === 'OT' ? blockName(f, b.speakers) : '',
+      text: b.type === 'OFF' ? '' : shortenText(b.full, { ...SCRIPT_LEVELS[level], freq }),
+      mode: 'short',
+    }));
+  f.script = { title, offGap, level, freq, blocks, edited: false, version: f.editVersion };
+}
+
+function reshortenScript(f) {
+  for (const b of f.script.blocks) {
+    if (b.type !== 'OFF' && b.mode === 'short') b.text = shortenText(b.full, shortOpts(f));
+  }
+}
+
+function markScriptChanged(f) {
+  f.unsavedScript = true;
+  renderUnsaved(f);
+}
+
+function autoSize(ta) {
+  ta.style.height = 'auto';
+  ta.style.height = `${Math.min(400, ta.scrollHeight + 4)}px`;
+}
+
+function scriptLabel(b) {
+  if (b.type === 'OT') return b.name ? `OT ${b.name}` : 'OT';
+  return b.type;
+}
+
+function renderScript(f) {
+  if (!f.script) generateScript(f);
+  const sc = f.script;
+  $('script-nospk').hidden = f.result.speakers > 0;
+  if (document.activeElement !== $('script-title')) $('script-title').value = sc.title;
+  $('script-off').value = String(sc.offGap);
+  $('script-level').value = String(sc.level);
+  $('script-level-text').textContent = SCRIPT_LEVELS[sc.level].text;
+  $('script-level').setAttribute('aria-valuetext', `Kürzung ${SCRIPT_LEVELS[sc.level].text}`);
+  $('script-stale').hidden = sc.version === f.editVersion;
+  const count = (t) => sc.blocks.filter((b) => b.type === t).length;
+  const fullWords = sc.blocks.reduce((n, b) => n + (b.type === 'OFF' ? 0 : b.full.split(/\s+/).filter(Boolean).length), 0);
+  const keptWords = sc.blocks.reduce((n, b) => n + (b.type === 'OFF' ? 0 : b.text.split(/\s+|…/).filter(Boolean).length), 0);
+  $('script-summary').textContent = `${count('OFF')} × OFF · ${count('OT')} × OT · ${count('Sit')} × Sit`
+    + (fullWords ? ` · gekürzt auf ca. ${Math.round((keptWords / fullWords) * 100)} % der Wörter` : '');
+  $('script-blocks').innerHTML = sc.blocks.map((b, i) => `
+    <article class="sblock t-${b.type}${b.mode === 'custom' ? ' custom' : ''}" data-block="${i}">
+      <div class="sblock-head">
+        <label class="visually-hidden" for="sb-type-${i}">Art von Block ${i + 1}</label>
+        <select id="sb-type-${i}" data-field="type">
+          ${['OT', 'Sit', 'OFF'].map((t) => `<option value="${t}"${t === b.type ? ' selected' : ''}>${t}</option>`).join('')}
+        </select>
+        ${b.type === 'OT' ? `<label class="visually-hidden" for="sb-name-${i}">Name in Block ${i + 1}</label>
+        <input id="sb-name-${i}" type="text" data-field="name" value="${esc(b.name)}" placeholder="Name" autocomplete="off">` : ''}
+        <span class="sblock-time">${formatTimecode(b.start)} – ${formatTimecode(b.end)}</span>
+        <button type="button" class="tool-btn" data-action="sb-play" aria-label="Block ${i + 1} anhören">${isPlaying(f.id, `b${i}`) ? `${STOP_ICON} Stopp` : `${PLAY_ICON} Anhören`}</button>
+        ${b.full ? `<button type="button" class="tool-btn" data-action="sb-full" aria-label="Block ${i + 1}: ${b.mode === 'full' ? 'gekürzt zeigen' : 'Volltext zeigen'}">${b.mode === 'full' ? 'Gekürzt' : 'Volltext'}</button>` : ''}
+      </div>
+      <label class="visually-hidden" for="sb-text-${i}">Text von Block ${i + 1}</label>
+      <textarea id="sb-text-${i}" data-field="text" rows="2" spellcheck="true" lang="${textLang(f)}"
+        placeholder="${b.type === 'OFF' ? 'Sprechertext (optional)' : 'Text'}">${esc(b.text)}</textarea>
+    </article>`).join('');
+  for (const ta of $('script-blocks').querySelectorAll('textarea')) autoSize(ta);
+}
+
+function scriptBlocksForExport(f) {
+  return f.script.blocks.map((b) => ({ ...b, label: scriptLabel(b) }));
+}
+
 // ---------- Anhören ----------
 
 const player = new Audio();
 player.preload = 'auto';
-let playback = null; // { fileId, index, stopAt }
+let playback = null; // { fileId, key, stopAt } – key: Abschnittsnummer oder 'b<Block>'
 
-function isPlaying(fileId, index) {
-  return playback && playback.fileId === fileId && playback.index === index && !player.paused;
+function isPlaying(fileId, key) {
+  return playback && playback.fileId === fileId && playback.key === key && !player.paused;
 }
 
 function refreshPlayButtons() {
   const f = currentView();
   if (!f || state.step !== 3) return;
   for (const el of $('transcript').querySelectorAll('.seg.playing')) el.classList.remove('playing');
-  if (playback && !player.paused && playback.fileId === f.id) segSpan(playback.index)?.classList.add('playing');
+  if (playback && !player.paused && playback.fileId === f.id && typeof playback.key === 'number') segSpan(playback.key)?.classList.add('playing');
   if (state.activeSeg !== null && $('seg-tools')) showSegTools(f, state.activeSeg);
   if (state.correcting !== null) {
     $('corr-play').innerHTML = isPlaying(f.id, state.correcting) ? `${STOP_ICON} Stopp` : `${PLAY_ICON} Anhören`;
+  }
+  for (const btn of $('script-blocks').querySelectorAll('[data-action="sb-play"]')) {
+    const key = `b${btn.closest('.sblock').dataset.block}`;
+    btn.innerHTML = isPlaying(f.id, key) ? `${STOP_ICON} Stopp` : `${PLAY_ICON} Anhören`;
   }
 }
 
@@ -870,8 +984,11 @@ function stopPlayback() {
 
 async function playSegment(f, index) {
   const seg = f.result.segments[index];
-  if (!seg) return;
-  if (isPlaying(f.id, index)) { stopPlayback(); return; }
+  if (seg) await playRange(f, seg.start, seg.end, index);
+}
+
+async function playRange(f, start, end, key) {
+  if (isPlaying(f.id, key)) { stopPlayback(); return; }
   try {
     if (!f.audioUrl) f.audioUrl = URL.createObjectURL(f.file);
     if (player.src !== f.audioUrl) {
@@ -881,8 +998,8 @@ async function playSegment(f, index) {
         player.addEventListener('error', reject, { once: true });
       });
     }
-    player.currentTime = Math.max(0, seg.start - 0.2);
-    playback = { fileId: f.id, index, stopAt: seg.end + 0.25 };
+    player.currentTime = Math.max(0, start - 0.2);
+    playback = { fileId: f.id, key, stopAt: end + 0.25 };
     await player.play();
     refreshPlayButtons();
     const tick = () => {
@@ -1081,6 +1198,45 @@ async function onAction(action, id) {
     case 'corr-start':
       if (f) startCorrecting(f);
       break;
+    case 'dl-script': {
+      if (!f) return;
+      if (!f.script) generateScript(f);
+      const files = scriptDocxFiles({ title: f.script.title, blocks: scriptBlocksForExport(f) });
+      const zipped = zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])), { level: 6 });
+      downloadBlob(`${baseName(f.name)} Textgerüst.docx`, new Blob([zipped], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
+      f.unsavedScript = false;
+      // Ohne Text-Korrekturen ist das Textgerüst das gewünschte Ergebnis. Mit Korrekturen nicht:
+      // Gekürzte Stellen stehen dann in keiner Datei, also weiter warnen, bis TXT/SRT geladen sind.
+      if (!f.modified) f.unsaved = false;
+      renderUnsaved(f);
+      break;
+    }
+    case 'script-regen':
+      if (!f) return;
+      if (f.script?.edited && !confirm('Das Textgerüst wird aus dem aktuellen Text neu erzeugt. Deine Anpassungen an den Blöcken gehen dabei verloren. Fortfahren?')) return;
+      generateScript(f, { keepSettings: true });
+      markScriptChanged(f);
+      renderScript(f);
+      break;
+    case 'sb-play': {
+      const card = document.activeElement?.closest?.('.sblock') ?? null;
+      const i = Number(id ?? card?.dataset.block);
+      const b = f?.script?.blocks[i];
+      if (b) playRange(f, b.start, b.end, `b${i}`);
+      break;
+    }
+    case 'sb-full': {
+      const i = Number(id);
+      const b = f?.script?.blocks[i];
+      if (!b) return;
+      if (b.mode === 'full') { b.text = shortenText(b.full, shortOpts(f)); b.mode = 'short'; }
+      else { b.text = b.full; b.mode = 'full'; }
+      f.script.edited = true;
+      markScriptChanged(f);
+      renderScript(f);
+      $('script-blocks').querySelector(`.sblock[data-block="${i}"] [data-action="sb-full"]`)?.focus();
+      break;
+    }
     case 'corr-prev':
       if (f) moveCorrecting(f, -1);
       break;
@@ -1122,6 +1278,7 @@ async function onAction(action, id) {
         .filter((u) => u.before !== u.after);
       f.unsaved = true;
       f.modified = true;
+      f.editVersion++;
       renderTranscript(f);
       renderSubtitles(f, false);
       renderUnsaved(f);
@@ -1140,6 +1297,7 @@ async function onAction(action, id) {
       }
       f.undo = null;
       f.unsaved = true;
+      f.editVersion++;
       renderTranscript(f);
       renderSubtitles(f, false);
       renderUnsaved(f);
@@ -1158,7 +1316,9 @@ async function onAction(action, id) {
 function bind() {
   document.addEventListener('click', (e) => {
     const el = e.target.closest('[data-action]');
-    if (el) onAction(el.dataset.action, el.dataset.id);
+    if (!el) return;
+    const blockId = el.closest?.('.sblock')?.dataset.block;
+    onAction(el.dataset.action, el.dataset.id ?? blockId);
   });
 
   const input = $('file-input');
@@ -1193,23 +1353,77 @@ function bind() {
   $('set-diarize').addEventListener('change', (e) => { state.settings.diarize = e.target.checked; saveSettings(); renderStep1(); });
   $('set-speakers').addEventListener('change', (e) => { state.settings.speakers = e.target.value; saveSettings(); });
 
-  for (const tab of [$('tab-text'), $('tab-subs')]) {
-    tab.addEventListener('click', () => {
-      state.tab = tab.id === 'tab-text' ? 'text' : 'subs';
-      const f = currentView();
-      if (f && state.tab === 'subs' && state.subsDirty) { renderSubtitles(f, false); state.subsDirty = false; }
-      renderTabs();
-    });
+  for (const t of TABS) {
+    const tab = $(`tab-${t}`);
+    tab.addEventListener('click', () => selectTab(t));
     tab.addEventListener('keydown', (e) => {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
       e.preventDefault();
-      state.tab = state.tab === 'text' ? 'subs' : 'text';
-      const f = currentView();
-      if (f && state.tab === 'subs' && state.subsDirty) { renderSubtitles(f, false); state.subsDirty = false; }
-      renderTabs();
-      (state.tab === 'text' ? $('tab-text') : $('tab-subs')).focus();
+      const i = TABS.indexOf(state.tab) + (e.key === 'ArrowRight' ? 1 : -1);
+      selectTab(TABS[(i + TABS.length) % TABS.length], true);
     });
   }
+
+  // Textgerüst
+  $('script-title').addEventListener('input', (e) => {
+    const f = currentView();
+    if (!f?.script) return;
+    f.script.title = e.target.value;
+    markScriptChanged(f);
+  });
+  $('script-off').addEventListener('change', (e) => {
+    const f = currentView();
+    if (!f?.script) return;
+    const value = Number(e.target.value);
+    if (f.script.edited && !confirm('Mit einer anderen OFF-Länge wird das Textgerüst neu eingeteilt. Deine Anpassungen an den Blöcken gehen dabei verloren. Fortfahren?')) {
+      e.target.value = String(f.script.offGap);
+      return;
+    }
+    f.script.offGap = value;
+    generateScript(f, { keepSettings: true });
+    markScriptChanged(f);
+    renderScript(f);
+  });
+  $('script-level').addEventListener('input', (e) => {
+    const f = currentView();
+    if (!f?.script) return;
+    f.script.level = Number(e.target.value);
+    reshortenScript(f);
+    markScriptChanged(f);
+    renderScript(f);
+  });
+  const sb = $('script-blocks');
+  sb.addEventListener('input', (e) => {
+    const f = currentView();
+    const card = e.target.closest?.('.sblock');
+    if (!f?.script || !card) return;
+    const b = f.script.blocks[Number(card.dataset.block)];
+    const field = e.target.dataset.field;
+    if (field === 'text') {
+      b.text = e.target.value;
+      b.mode = 'custom';
+      card.classList.add('custom');
+      autoSize(e.target);
+    } else if (field === 'name') {
+      b.name = e.target.value;
+    }
+    f.script.edited = true;
+    markScriptChanged(f);
+  });
+  sb.addEventListener('change', (e) => {
+    const f = currentView();
+    const card = e.target.closest?.('.sblock');
+    if (!f?.script || !card || e.target.dataset.field !== 'type') return;
+    const i = Number(card.dataset.block);
+    const b = f.script.blocks[i];
+    b.type = e.target.value;
+    if (b.type === 'OT' && !b.name) b.name = blockName(f, b.speakers);
+    if (b.type !== 'OFF' && !b.text && b.full) b.text = shortenText(b.full, shortOpts(f));
+    f.script.edited = true;
+    markScriptChanged(f);
+    renderScript(f);
+    sb.querySelector(`.sblock[data-block="${i}"] select`)?.focus();
+  });
 
   // Text direkt bearbeiten
   const tr = $('transcript');
@@ -1304,6 +1518,7 @@ function bind() {
     f.names[Number(i)] = e.target.value;
     f.unsaved = true;
     f.modified = true;
+    f.editVersion++;
     renderUnsaved(f);
     renderTranscript(f);
     renderSubtitles(f, false);

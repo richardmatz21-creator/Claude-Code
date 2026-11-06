@@ -197,7 +197,8 @@ async function transcribe(ctx, { audio, model, language, mode, encoderDtype }) {
     ctx.post({ type: 'progress', phase: 'transcribing', done: total * (processed / speechTotal), total });
   }
   segments.sort((a, b) => a.start - b.start);
-  return filterHallucinations(segments, levels);
+  // Die Lautstärke-Werte gehen mit zurück: Das Textgerüst misst Pausen daran.
+  return { ...filterHallucinations(segments, levels), levels };
 }
 
 function concatRegions(audio, regions, maxSec = 10) {
@@ -289,8 +290,8 @@ async function handleJob(job) {
   const ctx = { post: (msg) => self.postMessage({ ...msg, id: job.id, run: job.run }) };
   cancelled = false;
   try {
-    const { segments, removed } = await transcribe(ctx, job);
-    let result = { segments, removed, speakers: 0 };
+    const { segments, removed, levels } = await transcribe(ctx, job);
+    let result = { segments, removed, speakers: 0, levels };
     if (job.diarize && segments.length > 0) {
       const d = await diarize(ctx, { ...job, segments });
       result = { ...result, segments: d.segments, speakers: d.speakers };

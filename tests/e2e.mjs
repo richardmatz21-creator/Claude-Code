@@ -21,7 +21,11 @@ const TIMEOUT = 15 * 60 * 1000;
 const EXPECTED = ['Guten Morgen', 'Ablauf', 'Termine', 'Freitag', 'Vorschlag', 'Lieferung', 'Montag', 'Büro', 'Vielen Dank'];
 
 const server = await startServer(PORT);
-const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
+// UTF-8-Spracheinstellung, sonst verwirft Chromium Dateinamen mit Umlauten (z. B. „Textgerüst.docx“).
+const browser = await chromium.launch({
+  env: { ...process.env, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+  ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+});
 const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1280, height: 900 } });
 const page = await context.newPage();
 // Für den Abbruch-Test lässt sich das Einlesen künstlich verlangsamen (wie bei großen Dateien auf schwachen Laptops).
@@ -264,6 +268,63 @@ try {
     const txt = data.toString('utf8');
     assert.match(txt, /bis Freitag einen Vorschlag/);
     assert.doesNotMatch(txt, /Vielen Dank und bis bald/, 'geleerter Abschnitt steht noch im TXT');
+  });
+
+  await step('Textgerüst: Einteilung in Sit/OFF, Kürzung, Umstellen, Word-Datei', async () => {
+    await page.click('#tab-script');
+    await page.waitForSelector('#panel-script:not([hidden]) .sblock');
+    assert.equal(await page.inputValue('#script-title'), 'gespraech');
+    const types = await page.$$eval('#script-blocks select[data-field="type"]', (els) => els.map((e) => e.value));
+    results.textgeruest = types.join(' ');
+    assert.ok(types.includes('OFF'), `kein OFF: ${types}`);
+    assert.ok(types.includes('Sit'), `kein Sit: ${types}`);
+    assert.match(await page.textContent('#script-summary'), /OFF.*OT.*Sit.*gekürzt auf ca\. \d+ %/);
+    const firstText = await page.inputValue('#sb-text-0');
+    assert.match(firstText, /…/, 'erster Block nicht gekürzt');
+    // Schwächer kürzen → längerer Text
+    await page.fill('#script-level', '5');
+    assert.ok((await page.inputValue('#sb-text-0')).length > firstText.length, 'Regler wirkt nicht');
+    await page.fill('#script-level', '2');
+    // Block 1 auf OT umstellen → Name vorbelegt, änderbar
+    await page.selectOption('#sb-type-0', 'OT');
+    await page.waitForSelector('#sb-name-0');
+    assert.match(await page.inputValue('#sb-name-0'), /Richard/);
+    await page.fill('#sb-name-0', 'Richard');
+    // Volltext einsetzen und eigenen Text schreiben
+    await page.click('.sblock[data-block="0"] [data-action="sb-full"]');
+    assert.match(await page.inputValue('#sb-text-0'), /Guten Morgen\. Heute sprechen wir/);
+    await page.fill('#sb-text-1', 'Hier kommt der Sprechertext hin.');
+    await shot('8-textgeruest');
+    // Anhören eines Blocks
+    await page.click('.sblock[data-block="0"] [data-action="sb-play"]');
+    await page.waitForFunction(() => /Stopp/.test(document.querySelector('.sblock[data-block="0"] [data-action="sb-play"]').textContent));
+    await page.click('.sblock[data-block="0"] [data-action="sb-play"]');
+    // Word-Datei prüfen
+    const { name, data } = await readDownload(() => page.click('[data-action="dl-script"]'));
+    assert.equal(name, 'gespraech Textgerüst.docx');
+    const files = unzipSync(new Uint8Array(data));
+    const doc = strFromU8(files['word/document.xml']);
+    assert.match(doc, /w:orient="landscape"/);
+    assert.match(doc, />gespraech</);
+    assert.match(doc, />OT Richard</);
+    assert.match(doc, />OFF</);
+    assert.match(doc, />Sit</);
+    assert.match(doc, /Hier kommt der Sprechertext hin\./);
+    assert.match(doc, /00:00 – 00:\d\d/);
+    // Word-Download sichert Textgerüst und (da aktuell) auch die Text-Korrekturen
+    assert.equal(await page.isVisible('#unsaved-hint'), false, 'Hinweis bleibt nach Word-Download');
+    // Text im Tab „Text“ ändern → Hinweis „Neu erzeugen“
+    await page.click('#tab-text');
+    // Letzter Abschnitt eines Blocks: die letzten 3 Wörter bleiben beim Kürzen immer stehen.
+    await page.click('#transcript .seg[data-seg="5"]');
+    await page.keyboard.press('End');
+    await page.keyboard.type(' Ganz pünktlich.');
+    await page.click('#tab-script');
+    assert.equal(await page.isVisible('#script-stale'), true, 'kein Hinweis auf geänderten Text');
+    await page.click('[data-action="script-regen"]');
+    await page.waitForSelector('#script-stale', { state: 'hidden' });
+    assert.match(await page.$eval('#script-blocks', (el) => Array.from(el.querySelectorAll('textarea')).map((t) => t.value).join(' ')), /pünktlich/);
+    await page.click('#tab-text');
   });
 
   await step('Abbrechen bringt zurück zu Schritt 1', async () => {

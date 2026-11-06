@@ -81,6 +81,18 @@ export function planChunks(audio, sr = SAMPLE_RATE, { maxSec = 29, minSec = 18 }
 }
 
 /**
+ * Lautstärke, ab der ein Abschnitt als „Ton“ gilt: ca. 34 dB unter der lautesten Sprache, damit auch
+ * leise Sprecher erhalten bleiben; bei Rauschen etwas über dem Grundrauschen, aber nie höher als 26 dB
+ * unter der Sprache.
+ */
+export function speechThreshold(levels) {
+  const ref = speechLevel(levels);
+  const sorted = Array.from(levels).sort((a, b) => a - b);
+  const noise = sorted.length ? sorted[Math.floor(sorted.length * 0.1)] : 0;
+  return Math.max(0.0015, Math.min(ref * 0.05, Math.max(noise * 3, ref * 0.02)));
+}
+
+/**
  * Stille-Erkennung: Findet die Bereiche mit Ton und lässt längere Stille (≥ minGapSec) weg.
  * Die Tonbereiche werden zu Stücken von höchstens maxSec Sekunden zusammengesetzt.
  * Jedes Stück enthält eine Zuordnung zurück zur Originalzeit.
@@ -89,12 +101,7 @@ export function planChunks(audio, sr = SAMPLE_RATE, { maxSec = 29, minSec = 18 }
 export function planSpeechChunks(audio, levels, sr = SAMPLE_RATE, {
   maxSec = 29, minGapSec = 2, padSec = 0.5, frameSec = 0.1,
 } = {}) {
-  const ref = speechLevel(levels);
-  // Schwelle: ca. 34 dB unter der lautesten Sprache, damit auch leise Sprecher erhalten bleiben;
-  // bei Rauschen etwas über dem Grundrauschen, aber nie höher als 26 dB unter der Sprache.
-  const sorted = Array.from(levels).sort((a, b) => a - b);
-  const noise = sorted.length ? sorted[Math.floor(sorted.length * 0.1)] : 0;
-  const threshold = Math.max(0.0015, Math.min(ref * 0.05, Math.max(noise * 3, ref * 0.02)));
+  const threshold = speechThreshold(levels);
   const minGap = Math.round(minGapSec / frameSec);
   // 1. Tonbereiche in Abschnitten (100 ms)
   const regions = [];
@@ -530,4 +537,309 @@ export function assignSpeakers(segments, turns) {
     for (const [s, o] of overlap) if (o > best) { best = o; speaker = s; }
     return { ...seg, speaker };
   });
+}
+
+// ---------- Textgerüst (OT / Sit / OFF) ----------
+
+/** Timecode für das Textgerüst: MM:SS bzw. H:MM:SS. */
+export function formatTimecode(sec) {
+  return formatClock(sec);
+}
+
+// Abschnittsgrenzen auf den tatsächlichen Ton zuschneiden (Whisper-Abschnitte sind gepolstert).
+function trimToSpeech(seg, levels, threshold, frameSec = 0.1) {
+  let a = Math.max(0, Math.floor(seg.start / frameSec));
+  let b = Math.min(levels.length, Math.ceil(seg.end / frameSec));
+  while (a < b && levels[a] < threshold) a++;
+  while (b > a && levels[b - 1] < threshold) b--;
+  if (a >= b) return seg;
+  return { ...seg, start: Math.max(seg.start, a * frameSec), end: Math.min(seg.end, b * frameSec) };
+}
+
+const wordCount = (text) => text.split(/\s+/).filter(Boolean).length;
+
+/**
+ * Teilt das Transkript in Blöcke eines Textgerüsts ein:
+ *  - OFF: mindestens offGap Sekunden ohne Sprache (dort kommt der Sprechertext hin)
+ *  - OT:  eine Person spricht länger am Stück (ab longTurn Sekunden) – oder allein
+ *  - Sit: Hin und Her von zwei oder mehr Stimmen; ein kurzer Einwurf einer zweiten Stimme
+ *         („Ja.“) nach einem kurzen Block macht daraus ein Sit. Nach einem langen OT fällt
+ *         der Einwurf weg, das OT bleibt.
+ * @param segments [{start, end, text, speaker}] – nur Abschnitte mit Text werden genutzt
+ * @param levels Lautstärke je 100 ms (frameLevels); damit werden Pausen am Ton statt an Whisper gemessen
+ * @returns [{ type: 'OFF'|'OT'|'Sit', speakers: number[], start, end, full }]
+ */
+export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration = null, levels = null } = {}) {
+  const threshold = levels?.length ? speechThreshold(levels) : 0;
+  const segs = activeSegments(segments)
+    .map((s) => (levels?.length ? trimToSpeech(s, levels, threshold) : s))
+    .sort((a, b) => a.start - b.start);
+  const total = Math.max(duration ?? 0, segs.at(-1)?.end ?? 0);
+  const blocks = [];
+  const off = (start, end) => blocks.push({ type: 'OFF', speakers: [], start, end, full: '' });
+
+  // 1. Zusammenhängende Redebeiträge derselben Stimme
+  const turns = [];
+  for (const s of segs) {
+    const last = turns.at(-1);
+    if (last && last.speaker === s.speaker && s.start - last.end < offGap) {
+      last.end = Math.max(last.end, s.end);
+      last.texts.push(s.text.trim());
+    } else {
+      turns.push({ speaker: s.speaker, start: s.start, end: s.end, texts: [s.text.trim()] });
+    }
+  }
+  if (!turns.length) {
+    if (total >= offGap) off(0, total);
+    return blocks;
+  }
+  const textOf = (t) => t.texts.join(' ');
+  const isInterjection = (t) => t.end - t.start < 2 && wordCount(textOf(t)) <= 3;
+
+  // Ein kurzer Einwurf einer anderen Stimme („Ja.“) direkt nach einem langen Beitrag fällt weg –
+  // der lange Beitrag bleibt ein OT; spricht dieselbe Person danach weiter, wird es ein OT.
+  for (let k = 1; k < turns.length;) {
+    const t = turns[k], p = turns[k - 1];
+    if (isInterjection(t) && p.speaker !== t.speaker && p.end - p.start >= longTurn && t.start - p.end < offGap) {
+      turns.splice(k, 1);
+      const n = turns[k];
+      if (n && n.speaker === p.speaker && n.start - p.end < offGap) {
+        p.end = Math.max(p.end, n.end);
+        p.texts.push(...n.texts);
+        turns.splice(k, 1);
+      }
+      continue; // dieselbe Stelle erneut prüfen (mehrere Einwürfe hintereinander)
+    }
+    k++;
+  }
+
+  // 2. Beiträge ohne längere Pause bilden eine Strecke; zwischen Strecken liegt ein OFF
+  const runs = [];
+  for (const t of turns) {
+    const run = runs.at(-1);
+    if (run && t.start - run.at(-1).end < offGap) run.push(t);
+    else runs.push([t]);
+  }
+  const ot = (t) => blocks.push({ type: 'OT', speakers: [t.speaker], start: t.start, end: t.end, full: textOf(t) });
+  const sit = (ts) => blocks.push({
+    type: 'Sit',
+    speakers: [...new Set(ts.map((t) => t.speaker))],
+    start: ts[0].start,
+    end: ts.at(-1).end,
+    full: ts.map(textOf).join(' '),
+  });
+  if (runs[0][0].start >= offGap) off(0, runs[0][0].start);
+  runs.forEach((run, ri) => {
+    if (ri > 0) off(runs[ri - 1].at(-1).end, run[0].start);
+    const runStart = blocks.length;
+    // 3. Kurze Beiträge mehrerer Stimmen nacheinander = Sit; lange Beiträge = eigenes OT
+    let pending = [];
+    const flush = () => {
+      if (pending.length >= 2 && new Set(pending.map((t) => t.speaker)).size >= 2) sit(pending);
+      else pending.forEach(ot);
+      pending = [];
+    };
+    for (const t of run) {
+      const prev = blocks.length > runStart ? blocks.at(-1) : null;
+      if (!pending.length && prev && prev.type !== 'OFF' && isInterjection(t)
+        && (prev.type === 'Sit' || prev.end - prev.start < longTurn)) {
+        // Kurzer Einwurf („Ja.“) nach einem kurzen Block gehört dazu; zwei Stimmen = Sit
+        prev.full += ' ' + textOf(t);
+        prev.end = t.end;
+        if (!prev.speakers.includes(t.speaker)) prev.speakers.push(t.speaker);
+        if (prev.speakers.length >= 2) prev.type = 'Sit';
+      } else if (t.end - t.start >= longTurn) {
+        flush();
+        ot(t);
+      } else {
+        pending.push(t);
+      }
+    }
+    flush();
+  });
+  const lastEnd = runs.at(-1).at(-1).end;
+  if (total - lastEnd >= offGap) off(lastEnd, total);
+  return blocks;
+}
+
+// Häufige deutsche Wörter, die als Schlagwort nichts aussagen.
+const STOPWORDS = new Set(`
+aber alle allem allen aller alles also am an ander andere anderen anders auch auf aus bei beim bin bis bist bisschen bloß
+da dabei dadurch dafür dagegen daher damit dann daran darauf darum das dass dein deine dem den denn der des deshalb dich die
+dies diese diesem diesen dieser dieses dir doch dort du durch eben ebenso ehrlich eigentlich ein eine einem einen einer eines
+einfach einmal er es etwas euch euer eure für gar gegen gehabt gell genau gerade gewesen gibt ging glaube habe haben hab hast
+hat hatte hatten hier hin hinter ich ihm ihn ihnen ihr ihre im immer in ins irgendwie ist ja jede jedem jeden jeder jetzt
+kann kannst kein keine keinen klar können könnte mach machen macht mal man manchmal mehr mein meine meinem meinen mich mir mit
+muss müssen nach natürlich nein nicht nichts noch nun nur ob oder ohne okay ok schon sehr sein seine seinem seinen sich sie
+sind so solche soll sollen sondern sowas sozusagen über um und uns unser unsere unter viel vielleicht voll vom von vor wahrscheinlich
+war waren warum was weil weiß weiter welche wenn wer werde werden wie wieder will wir wird wirklich wo wollen worden würde
+würden zu zum zur zwar zwischen äh ähm hm mhm na naja halt quasi tja
+als ganz total irgendwann echt eh sowieso nämlich trotzdem überhaupt drauf dran drin sagen sag sagt gesagt find finde
+glaub weißt meinst gemacht sein worden bisl bissl
+`.trim().split(/\s+/));
+
+const WORD_CORE = /^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu;
+const coreWord = (w) => w.replace(WORD_CORE, '');
+
+/** Zählt, wie oft jedes Wort im ganzen Transkript vorkommt (für die Seltenheit). */
+export function wordFrequencies(texts) {
+  const freq = new Map();
+  for (const t of texts) {
+    for (const w of t.split(/\s+/)) {
+      const c = coreWord(w).toLowerCase();
+      if (c) freq.set(c, (freq.get(c) ?? 0) + 1);
+    }
+  }
+  return freq;
+}
+
+// Allerweltswörter, die als Hauptwort zwar groß geschrieben sind, aber wenig Inhalt tragen.
+const GENERIC = new Set(`
+anfang augen beginn ding dinge ende fall ganze mal moment leute sache sachen seite stück teil tag tage weise zeit
+woche wochen jahr jahre mensch menschen art punkt frage antwort gefühl leben
+`.trim().split(/\s+/));
+
+// Endet ein Wort einen Satz? „15.“ (Datum) zählt nicht als Satzende.
+const endsSentence = (w) => /[.!?…]$/.test(w ?? '') && !/^\d+\.$/.test(w ?? '');
+const endsClause = (w) => endsSentence(w) || /[,;:]$/.test(w ?? '');
+
+/**
+ * Kürzt einen Text wie in einem Textgerüst: erste 3 Wörter … Schlagwort-Gruppen … letzte 3 Wörter.
+ * Nur wo wirklich etwas fehlt, steht „…“. Kurze Texte (bis keepUpTo Wörter) bleiben ganz.
+ * @param ratio Anteil der Wörter, der ungefähr stehen bleiben soll (z. B. 0.22)
+ * @param groupSize Wörter je Schlagwort-Gruppe (2 = „Kühe melken“, 3–4 = längere Satzteile)
+ * @param maxGroups höchstens so viele Gruppen
+ * @param freq Worthäufigkeiten im ganzen Transkript (seltene Wörter sind bessere Schlagwörter)
+ */
+export function shortenText(text, { ratio = 0.22, keepUpTo = 10, freq = null, groupSize = 2, maxGroups = 3 } = {}) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= keepUpTo) return words.join(' ');
+  const n = words.length;
+  const head = 3;
+  const tailStart = n - 3;
+  const lower = (w) => coreWord(w).toLowerCase();
+  const isStop = (w) => { const c = lower(w); return !c || STOPWORDS.has(c); };
+  // Wörter aus Anfang und Ende nicht noch einmal als Schlagwort wählen
+  const used = new Set([...words.slice(0, head), ...words.slice(tailStart)].map(lower));
+
+  // Schlagwort-Kandidaten in der Mitte bewerten
+  const candidates = [];
+  for (let i = head; i < tailStart; i++) {
+    const c = coreWord(words[i]);
+    if (!c || STOPWORDS.has(c.toLowerCase()) || used.has(c.toLowerCase())) continue;
+    let score = 0;
+    if (/^\p{Lu}/u.test(c)) score += endsSentence(words[i - 1]) ? 1 : 3; // Hauptwort oder Name
+    if (/\p{N}/u.test(c)) score += 2;                                      // Zahlen, Uhrzeiten, Daten
+    if (c.length >= 7) score += 1;
+    if (c.length >= 10) score += 1;
+    if (freq && (freq.get(c.toLowerCase()) ?? 0) <= 1) score += 1;        // selten = aussagekräftig
+    if (GENERIC.has(c.toLowerCase())) score -= 2;
+    if (score >= 2) candidates.push({ i, score });
+  }
+  candidates.sort((a, b) => b.score - a.score || a.i - b.i);
+
+  // Wenige kurze Wortgruppen statt vieler Einzelwörter; mehr und längere Gruppen bei schwächerer Kürzung
+  const budget = Math.max(1, Math.round(ratio * n) - 6);
+  const groups = Math.max(1, Math.min(maxGroups, Math.round(budget / groupSize)));
+  const picks = [];
+  for (const cand of candidates) {
+    if (picks.length >= groups) break;
+    const w = lower(words[cand.i]);
+    // nicht zu dicht beieinander, und dasselbe Wort nicht kurz hintereinander
+    if (picks.some((p) => Math.abs(p - cand.i) <= groupSize || (lower(words[p]) === w && Math.abs(p - cand.i) < 30))) continue;
+    picks.push(cand.i);
+  }
+  const keep = new Set();
+  for (const i of picks) {
+    keep.add(i);
+    let lo = i, hi = i;
+    // Gruppe um das Schlagwort bilden, ohne über Satz- oder Teilsatzgrenzen zu springen
+    while (hi - lo + 1 < groupSize) {
+      const canNext = hi + 1 < tailStart && !endsClause(words[hi]) && (groupSize > 2 || !isStop(words[hi + 1]));
+      const canPrev = lo - 1 >= head && !endsClause(words[lo - 1]) && (groupSize > 2 || !isStop(words[lo - 1]));
+      if (canNext) keep.add(++hi);
+      else if (canPrev) keep.add(--lo);
+      else break;
+    }
+  }
+
+  // Zusammenhängende Wörter bilden Stücke; nur zwischen getrennten Stücken steht „…“
+  const all = [...Array(head).keys(), ...[...keep].sort((a, b) => a - b), ...Array.from({ length: 3 }, (_, k) => tailStart + k)];
+  const runs = [];
+  for (const i of all) {
+    const run = runs.at(-1);
+    if (run && i === run.at(-1) + 1) run.push(i);
+    else if (!run || i > run.at(-1)) runs.push([i]);
+  }
+  const clean = (piece) => piece.replace(/[\s,;:–—-]+$/u, '').replace(/^[\s,;:–—-]+/u, '');
+  return runs
+    .map((run, k) => {
+      const piece = clean(run.map((i) => words[i]).join(' '));
+      // Satzzeichen vor „…“ weglassen; das Satzende am Schluss bleibt.
+      return k < runs.length - 1 ? piece.replace(/(?<!\d)[.!?]+$/u, '') : piece;
+    })
+    .filter(Boolean)
+    .join('…');
+}
+
+// ---------- Word-Datei (.docx) im Layout der Textgerüst-Vorlage ----------
+
+// Steuerzeichen sind in Word-XML ungültig und werden entfernt.
+const xmlEsc = (s) => String(s ?? '')
+  .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '')
+  .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+const COLS = [846, 8788, 3261]; // wie in der Vorlage: schmal | Text | Timecode
+
+function para(text, { bold = false } = {}) {
+  const rPr = bold ? '<w:rPr><w:b/><w:bCs/></w:rPr>' : '';
+  if (!text) return `<w:p><w:pPr>${rPr}</w:pPr></w:p>`;
+  return `<w:p><w:pPr>${rPr}</w:pPr><w:r>${rPr}<w:t xml:space="preserve">${xmlEsc(text)}</w:t></w:r></w:p>`;
+}
+function cell(width, paras, fill = null) {
+  const shd = fill ? `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/>` : '';
+  return `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/>${shd}</w:tcPr>${paras.join('') || para('')}</w:tc>`;
+}
+function row(cells) { return `<w:tr>${cells.join('')}</w:tr>`; }
+
+/**
+ * Alle Dateien einer Word-Datei für das Textgerüst (als Texte). Querformat, Arial 11,
+ * Tabelle mit grüner Titelzeile, OFF fett, OT/Sit mit Text darunter, Timecode rechts.
+ * @param blocks [{ type, label, text, start, end }]
+ */
+export function scriptDocxFiles({ title, blocks }) {
+  const head = row([
+    cell(COLS[0], [para('', { bold: true })], '8DD873'),
+    cell(COLS[1], [para(title, { bold: true })], '8DD873'),
+    cell(COLS[2], [para('', { bold: true })], '8DD873'),
+  ]);
+  const body = blocks.map((b) => {
+    const lines = (b.text ?? '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
+    const main = b.type === 'OFF'
+      ? [para('OFF', { bold: true }), ...lines.map((l) => para(l, { bold: true }))] // Sprechertext fett wie in der Vorlage
+      : [para(b.label), ...lines.map((l) => para(l))];
+    const tc = `${formatTimecode(b.start)} – ${formatTimecode(b.end)}`;
+    return row([cell(COLS[0], [para('')]), cell(COLS[1], main), cell(COLS[2], [para(tc)])]);
+  }).join('');
+  const borders = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+    .map((s) => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="auto"/>`).join('');
+  const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document ${W_NS}><w:body><w:tbl><w:tblPr><w:tblStyle w:val="Tabellenraster"/><w:tblW w:w="0" w:type="auto"/><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid>${COLS.map((c) => `<w:gridCol w:w="${c}"/>`).join('')}</w:tblGrid>${head}${body}</w:tbl><w:p/><w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles ${W_NS}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial" w:cs="Arial"/><w:sz w:val="22"/><w:szCs w:val="22"/><w:lang w:val="de-DE" w:eastAsia="en-US" w:bidi="ar-SA"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Standard"><w:name w:val="Normal"/><w:qFormat/></w:style><w:style w:type="table" w:default="1" w:styleId="NormaleTabelle"><w:name w:val="Normal Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style><w:style w:type="table" w:styleId="Tabellenraster"><w:name w:val="Table Grid"/><w:basedOn w:val="NormaleTabelle"/><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:tblPr><w:tblBorders>${borders}</w:tblBorders></w:tblPr></w:style></w:styles>`;
+  return {
+    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>`,
+    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+    'word/_rels/document.xml.rels': `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    'word/document.xml': document,
+    'word/styles.xml': styles,
+  };
+}
+
+/** Vorschlag für die Titelzeile aus dem Dateinamen („Folge_3_Hof.mp4“ → „Folge 3 Hof“). */
+export function titleFromFileName(name) {
+  return baseName(name).replace(/[_]+/g, ' ').replace(/\s+/g, ' ').trim();
 }

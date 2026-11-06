@@ -156,7 +156,7 @@
           <button type="button" class="btn btn-secondary" data-action="dl-zip" id="zip-btn">Alle als ZIP</button>
         </div>
         <p class="small muted" id="copy-status" role="status" aria-live="polite"></p>
-        <p class="small unsaved-hint" id="unsaved-hint" hidden>Deine Korrekturen sind noch nicht heruntergeladen. Die Seite speichert nichts – bitte vor dem Schließen SRT oder TXT laden.</p>
+        <p class="small unsaved-hint" id="unsaved-hint" hidden>Deine Änderungen sind noch nicht heruntergeladen. Die Seite speichert nichts – bitte vor dem Schließen SRT, TXT oder das Textgerüst laden.</p>
       </div>
 
       <div class="edit-bar" id="edit-bar">
@@ -212,6 +212,7 @@
       <div class="tabs" role="tablist" aria-label="Ansicht">
         <button type="button" role="tab" id="tab-text" aria-controls="panel-text" aria-selected="true">Text</button>
         <button type="button" role="tab" id="tab-subs" aria-controls="panel-subs" aria-selected="false" tabindex="-1">Untertitel</button>
+        <button type="button" role="tab" id="tab-script" aria-controls="panel-script" aria-selected="false" tabindex="-1">Textgerüst</button>
       </div>
 
       <div role="tabpanel" id="panel-text" aria-labelledby="tab-text" class="panel">
@@ -234,6 +235,40 @@
         <div class="cues" id="cues"></div>
       </div>
 
+      <div role="tabpanel" id="panel-script" aria-labelledby="tab-script" class="panel" hidden>
+        <p class="notice notice-info" id="script-nospk" hidden>Für OT und Sit braucht das Textgerüst die Sprecher-Erkennung. Diese Datei wurde ohne „Sprecher erkennen“ umgewandelt – alle Beiträge erscheinen deshalb als OT ohne Namen. Tipp: Datei erneut mit eingeschalteter Sprecher-Erkennung umwandeln.</p>
+        <div class="script-controls">
+          <div class="field field-wide">
+            <label for="script-title">Titelzeile</label>
+            <input id="script-title" type="text" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="script-off">OFF ab … ohne Sprache</label>
+            <select id="script-off">
+              <option value="2">2 Sekunden</option>
+              <option value="3">3 Sekunden</option>
+              <option value="5">5 Sekunden</option>
+              <option value="8">8 Sekunden</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="script-level">Kürzung: <span id="script-level-text"></span></label>
+            <input id="script-level" type="range" min="1" max="5" step="1" aria-describedby="script-level-hint">
+            <span class="small muted range-ends" id="script-level-hint" aria-hidden="true"><span>stärker</span><span>schwächer</span></span>
+          </div>
+        </div>
+        <div class="row-wrap">
+          <button type="button" class="btn btn-primary" data-action="dl-script">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/></svg>
+            Textgerüst (Word)
+          </button>
+          <button type="button" class="btn btn-secondary" data-action="script-regen">Neu erzeugen</button>
+        </div>
+        <p class="small unsaved-hint" id="script-stale" hidden>Text oder Sprecher-Namen wurden seit dem Erzeugen geändert. „Neu erzeugen“ übernimmt das – deine Anpassungen im Textgerüst gehen dabei verloren.</p>
+        <p class="small muted" id="script-summary" role="status" aria-live="polite"></p>
+        <div class="script-blocks" id="script-blocks"></div>
+      </div>
+
       <p class="small muted panel-foot" id="removed-note" hidden></p>
     </section>
 
@@ -246,6 +281,7 @@
       <li><strong>Dateien wählen:</strong> eine oder mehrere Audio- oder Videodateien hineinziehen oder auswählen.</li>
       <li><strong>Umwandeln:</strong> Die Seite wandelt die Dateien nacheinander in Text um. Beim allerersten Mal wird das Sprachmodell einmalig geladen (je nach Gerät ca. 280–360 MB bei „Ausgewogen“, ca. 100–120 MB bei „Schnell“; für die Sprecher-Erkennung zusätzlich ca. 33 MB). Danach bleibt es im Browser gespeichert.</li>
       <li><strong>Ergebnis:</strong> Text kopieren oder als TXT laden, Untertitel als SRT für Videoprogramme (z. B. CapCut, Premiere, DaVinci Resolve) laden.</li>
+      <li><strong>Textgerüst:</strong> Der Tab „Textgerüst“ ordnet das Material automatisch in OFF (niemand spricht), OT (eine Person spricht länger) und Sit (Hin und Her von mehreren Stimmen) ein und kürzt die Aussagen auf Anfang…Schlagwörter…Ende. Jeder Block lässt sich umstellen und bearbeiten; der Download ist eine Word-Datei im Layout der Textgerüst-Vorlage. Dafür beim Umwandeln „Sprecher erkennen“ einschalten und die Sprecher benennen.</li>
     </ol>
     <p class="muted">Tipps: Chrome oder Edge verwenden. Tab sichtbar lassen. „Sprecher erkennen“ funktioniert am besten, wenn sich die Personen nicht ins Wort fallen. Bei langen Aufnahmen kann die Zuordnung manchmal wechseln – die Namen lassen sich im Ergebnis ändern.</p>
     <p class="muted">Lange Wartezeit? Auf Laptops ohne geeignete Grafikkarte rechnet der Prozessor; das dauert länger. „Schnell“ ist deutlich schneller, macht aber mehr Fehler.</p>
