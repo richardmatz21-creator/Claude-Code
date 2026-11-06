@@ -18,6 +18,20 @@ env.allowLocalModels = true;
 // Nur der Pfad, keine volle URL: transformers.js 4.3 prüft lokale Dateien sonst nicht.
 env.localModelPath = new URL('models/', ASSET_URL).pathname;
 env.useBrowserCache = true;
+// Firmen-Proxys liefern bei gesperrten Downloads oft eine HTML-Seite (403) oder einen Serverfehler.
+// transformers.js würde diese wie eine Modelldatei lesen – deshalb hier klar als Ladefehler melden.
+const defaultFetch = env.fetch;
+env.fetch = async (input, init) => {
+  const res = await defaultFetch(input, init);
+  const url = typeof input === 'string' ? input : (input?.url ?? String(input));
+  if (url.includes(`/${ASSETS}/`)) {
+    const type = res.headers.get('content-type') || '';
+    if (res.status === 403 || res.status >= 500 || (res.ok && type.includes('text/html'))) {
+      throw new Error(`Ladefehler (HTTP ${res.status}): ${url.split('/').pop()} wurde blockiert`);
+    }
+  }
+  return res;
+};
 const wasm = env.backends.onnx.wasm;
 wasm.wasmPaths = {
   mjs: new URL('vendor/ort-wasm-simd-threaded.asyncify.mjs', ASSET_URL).href,
@@ -77,7 +91,7 @@ async function gpuStage(mode, fn) {
   }
 }
 // Ladefehler (Netz weg, Datei nicht erreichbar) sind keine Grafikkarten-Probleme.
-const NETWORK_ERROR = /fetch|network|Failed to load|Load failed|not found locally|Could not locate|ModelFileNotFound|\b40[34]\b|\b50\d\b|ERR_/i;
+const NETWORK_ERROR = /fetch|network|Failed to load|Load failed|not found locally|Could not locate|ModelFileNotFound|Ladefehler|blockiert|is not valid JSON|Unexpected token '<'|protobuf|\b40[34]\b|\b50\d\b|ERR_/i;
 
 // Lade-Fortschritt über alle Dateien eines Modells zusammenfassen.
 function progressReporter(ctx, what) {

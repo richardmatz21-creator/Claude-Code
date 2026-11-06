@@ -136,29 +136,10 @@ async function copyVendor(assetsDir) {
   }
 }
 
-// Lizenztexte der mitgelieferten Software und Hinweise zu den Modellen.
-async function writeLicenses() {
-  const { models } = JSON.parse(await readFile(join(ROOT, 'scripts', 'models.json'), 'utf8'));
-  const parts = [
-    'Audio zu Text – Lizenzen der mitgelieferten Software und Modelle',
-    '='.repeat(64),
-    '',
-    'MODELLE',
-    ...models.map((m) => `- ${m.id} (Revision ${m.revision}) – ${m.license} – https://huggingface.co/${m.id}`),
-    '',
-    'Whisper: Copyright (c) 2022 OpenAI, MIT-Lizenz (https://github.com/openai/whisper/blob/main/LICENSE).',
-    'pyannote segmentation-3.0: Copyright (c) pyannote.audio contributors, MIT-Lizenz.',
-    'wespeaker-voxceleb-resnet34-LM: WeSpeaker-Projekt (https://github.com/wenet-e2e/wespeaker), bereitgestellt von pyannote',
-    '  (https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM), Lizenz CC BY 4.0',
-    '  (https://creativecommons.org/licenses/by/4.0/). Änderung: ins ONNX-Format umgewandelt von onnx-community.',
-    '',
-  ];
-  const libs = [
-    ['Transformers.js (@huggingface/transformers)', join(NM, '@huggingface', 'transformers', 'LICENSE')],
-    // Das npm-Paket enthält keine LICENSE-Datei; MIT-Text laut https://github.com/microsoft/onnxruntime/blob/main/LICENSE
-    ['ONNX Runtime Web (onnxruntime-web)', join(NM, 'onnxruntime-web', 'LICENSE'), `MIT License
+function mitLicense(copyright) {
+  return `MIT License
 
-Copyright (c) Microsoft Corporation
+${copyright}
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -176,14 +157,39 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.`],
+SOFTWARE.`;
+}
+
+// Lizenztexte der mitgelieferten Software und Hinweise zu den Modellen.
+async function writeLicenses() {
+  const { models } = JSON.parse(await readFile(join(ROOT, 'scripts', 'models.json'), 'utf8'));
+  const parts = [
+    'Audio zu Text – Lizenzen der mitgelieferten Software und Modelle',
+    '='.repeat(64),
+    '',
+    'MODELLE',
+    ...models.map((m) => `- ${m.id} (Revision ${m.revision}) – ${m.license} – https://huggingface.co/${m.id}`),
+    '',
+    'Whisper (https://github.com/openai/whisper): siehe Lizenztext „Whisper“ unten.',
+    'pyannote segmentation-3.0 (https://huggingface.co/pyannote/segmentation-3.0): siehe Lizenztext „pyannote“ unten.',
+    'wespeaker-voxceleb-resnet34-LM: WeSpeaker-Projekt (https://github.com/wenet-e2e/wespeaker), bereitgestellt von pyannote',
+    '  (https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM), Lizenz CC BY 4.0',
+    '  (https://creativecommons.org/licenses/by/4.0/). Änderung: ins ONNX-Format umgewandelt von onnx-community.',
+    '',
+  ];
+  const libs = [
+    ['Whisper (Modell)', null, mitLicense('Copyright (c) 2022 OpenAI')],
+    ['pyannote segmentation-3.0 (Modell)', null, mitLicense('Copyright (c) 2020 CNRS')],
+    ['Transformers.js (@huggingface/transformers)', join(NM, '@huggingface', 'transformers', 'LICENSE')],
+    // Das npm-Paket enthält keine LICENSE-Datei; MIT laut https://github.com/microsoft/onnxruntime/blob/main/LICENSE
+    ['ONNX Runtime Web (onnxruntime-web)', join(NM, 'onnxruntime-web', 'LICENSE'), mitLicense('Copyright (c) Microsoft Corporation')],
     ['fflate', join(NM, 'fflate', 'LICENSE')],
     ['coi-serviceworker', join(NM, 'coi-serviceworker', 'LICENSE')],
     ['Schrift Figtree (@fontsource/figtree)', join(NM, '@fontsource', 'figtree', 'LICENSE')],
   ];
   for (const [name, file, fallback] of libs) {
     let text;
-    try { text = await readFile(file, 'utf8'); } catch { text = fallback ?? null; }
+    try { text = file ? await readFile(file, 'utf8') : fallback; } catch { text = fallback ?? null; }
     if (!text) throw new Error(`Lizenztext fehlt: ${file}`);
     parts.push('', '-'.repeat(64), name, '-'.repeat(64), text.trim());
   }

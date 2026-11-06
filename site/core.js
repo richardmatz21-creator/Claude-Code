@@ -90,7 +90,11 @@ export function planSpeechChunks(audio, levels, sr = SAMPLE_RATE, {
   maxSec = 29, minGapSec = 2, padSec = 0.5, frameSec = 0.1,
 } = {}) {
   const ref = speechLevel(levels);
-  const threshold = Math.max(0.002, ref * 0.05); // ca. 26 dB unter der Sprache
+  // Schwelle: ca. 34 dB unter der lautesten Sprache, damit auch leise Sprecher erhalten bleiben;
+  // bei Rauschen etwas über dem Grundrauschen, aber nie höher als 26 dB unter der Sprache.
+  const sorted = Array.from(levels).sort((a, b) => a - b);
+  const noise = sorted.length ? sorted[Math.floor(sorted.length * 0.1)] : 0;
+  const threshold = Math.max(0.0015, Math.min(ref * 0.05, Math.max(noise * 3, ref * 0.02)));
   const minGap = Math.round(minGapSec / frameSec);
   // 1. Tonbereiche in Abschnitten (100 ms)
   const regions = [];

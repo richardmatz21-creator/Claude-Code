@@ -63,6 +63,16 @@ test('planSpeechChunks lässt lange Stille weg und packt Ton zusammen', () => {
   assert.ok(chunkTimeToSource(c, firstLen + 1) > 25, 'Zeit im zweiten Teil liegt nach der langen Pause');
 });
 
+test('planSpeechChunks: leiser Sprecher (30 dB leiser) bleibt erhalten', () => {
+  const sil = (sec) => new Float32Array(Math.round(sec * SAMPLE_RATE));
+  const quiet = tone(4, 0.3 / 31.6); // −30 dB
+  const audio = concat(tone(4), sil(5), quiet, sil(5), tone(4));
+  const chunks = planSpeechChunks(audio, frameLevels(audio));
+  const kept = chunks.reduce((n, c) => n + c.length, 0) / SAMPLE_RATE;
+  assert.ok(kept >= 12, `nur ${kept} s behalten – leiser Teil fehlt`);
+  assert.ok(kept < 17, `${kept} s behalten – Stille nicht entfernt`);
+});
+
 test('planSpeechChunks: nur Stille → keine Stücke, langer Ton → Stücke ≤ 29 s', () => {
   const silent = new Float32Array(30 * SAMPLE_RATE);
   assert.deepEqual(planSpeechChunks(silent, frameLevels(silent)), []);

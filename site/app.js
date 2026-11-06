@@ -176,8 +176,8 @@ function friendlyError(message) {
   if (/memory|allocation|out of memory|RangeError/i.test(message)) {
     return 'Nicht genug Arbeitsspeicher. Tipp: andere Tabs schließen, „Schnell“ wählen oder die Datei kürzen.';
   }
-  if (/fetch|network|Failed to load|Load failed|not found locally|Could not locate|ModelFileNotFound|\b40[34]\b|\b50\d\b/i.test(message)) {
-    return 'Ein Teil des Sprachmodells konnte nicht geladen werden. Bitte Internetverbindung prüfen und Seite neu laden.';
+  if (/fetch|network|Failed to load|Load failed|not found locally|Could not locate|ModelFileNotFound|Ladefehler|blockiert|is not valid JSON|Unexpected token '<'|protobuf|\b40[34]\b|\b50\d\b/i.test(message)) {
+    return 'Das Sprachmodell konnte nicht geladen werden. Bitte Internetverbindung prüfen und die Seite neu laden. Im Firmennetz sperrt eventuell die IT den Download – dann bitte dort nachfragen.';
   }
   return `Unerwarteter Fehler: ${message}`;
 }
@@ -284,7 +284,7 @@ function addFiles(list) {
       status: ok ? (state.running ? 'waiting' : 'ready') : 'error',
       error: ok ? null : 'Das ist keine Audio- oder Videodatei.',
       settings: { ...state.settings },
-      inRun: ok && state.running,
+      inRun: state.running,
     };
     state.files.push(entry);
     added++;
