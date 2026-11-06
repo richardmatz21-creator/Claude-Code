@@ -563,7 +563,8 @@ const wordCount = (text) => text.split(/\s+/).filter(Boolean).length;
  *  - OFF: mindestens offGap Sekunden ohne Sprache (dort kommt der Sprechertext hin)
  *  - OT:  eine Person spricht länger am Stück (ab longTurn Sekunden) – oder allein
  *  - Sit: Hin und Her von zwei oder mehr Stimmen; ein kurzer Einwurf einer zweiten Stimme
- *         („Ja.“) macht aus dem Block davor ebenfalls ein Sit
+ *         („Ja.“) nach einem kurzen Block macht daraus ein Sit. Nach einem langen OT fällt
+ *         der Einwurf weg, das OT bleibt.
  * @param segments [{start, end, text, speaker}] – nur Abschnitte mit Text werden genutzt
  * @param levels Lautstärke je 100 ms (frameLevels); damit werden Pausen am Ton statt an Whisper gemessen
  * @returns [{ type: 'OFF'|'OT'|'Sit', speakers: number[], start, end, full }]
@@ -592,6 +593,23 @@ export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration
     if (total >= offGap) off(0, total);
     return blocks;
   }
+  const textOf = (t) => t.texts.join(' ');
+  const isInterjection = (t) => t.end - t.start < 2 && wordCount(textOf(t)) <= 3;
+
+  // Ein kurzer Einwurf einer anderen Stimme („Ja.“) direkt nach einem langen Beitrag fällt weg –
+  // der lange Beitrag bleibt ein OT; spricht dieselbe Person danach weiter, wird es ein OT.
+  for (let k = turns.length - 1; k >= 1; k--) {
+    const t = turns[k], p = turns[k - 1];
+    if (isInterjection(t) && p.speaker !== t.speaker && p.end - p.start >= longTurn && t.start - p.end < offGap) {
+      turns.splice(k, 1);
+      const n = turns[k];
+      if (n && n.speaker === p.speaker && n.start - p.end < offGap) {
+        p.end = Math.max(p.end, n.end);
+        p.texts.push(...n.texts);
+        turns.splice(k, 1);
+      }
+    }
+  }
 
   // 2. Beiträge ohne längere Pause bilden eine Strecke; zwischen Strecken liegt ein OFF
   const runs = [];
@@ -600,7 +618,6 @@ export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration
     if (run && t.start - run.at(-1).end < offGap) run.push(t);
     else runs.push([t]);
   }
-  const textOf = (t) => t.texts.join(' ');
   const ot = (t) => blocks.push({ type: 'OT', speakers: [t.speaker], start: t.start, end: t.end, full: textOf(t) });
   const sit = (ts) => blocks.push({
     type: 'Sit',
@@ -609,8 +626,6 @@ export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration
     end: ts.at(-1).end,
     full: ts.map(textOf).join(' '),
   });
-  const isInterjection = (t) => t.end - t.start < 2 && wordCount(textOf(t)) <= 3;
-
   if (runs[0][0].start >= offGap) off(0, runs[0][0].start);
   runs.forEach((run, ri) => {
     if (ri > 0) off(runs[ri - 1].at(-1).end, run[0].start);
@@ -624,8 +639,9 @@ export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration
     };
     for (const t of run) {
       const prev = blocks.length > runStart ? blocks.at(-1) : null;
-      if (!pending.length && prev && prev.type !== 'OFF' && isInterjection(t)) {
-        // Kurzer Einwurf („Ja.“) gehört zum Block davor; zwei Stimmen = Sit
+      if (!pending.length && prev && prev.type !== 'OFF' && isInterjection(t)
+        && (prev.type === 'Sit' || prev.end - prev.start < longTurn)) {
+        // Kurzer Einwurf („Ja.“) nach einem kurzen Block gehört dazu; zwei Stimmen = Sit
         prev.full += ' ' + textOf(t);
         prev.end = t.end;
         if (!prev.speakers.includes(t.speaker)) prev.speakers.push(t.speaker);

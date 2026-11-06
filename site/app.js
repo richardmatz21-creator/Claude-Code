@@ -1205,8 +1205,9 @@ async function onAction(action, id) {
       const zipped = zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])), { level: 6 });
       downloadBlob(`${baseName(f.name)} Textgerüst.docx`, new Blob([zipped], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
       f.unsavedScript = false;
-      // Enthält das Textgerüst alle Text-Korrekturen, sind auch diese gesichert.
-      if (f.script.version === f.editVersion) f.unsaved = false;
+      // Ohne Text-Korrekturen ist das Textgerüst das gewünschte Ergebnis. Mit Korrekturen nicht:
+      // Gekürzte Stellen stehen dann in keiner Datei, also weiter warnen, bis TXT/SRT geladen sind.
+      if (!f.modified) f.unsaved = false;
       renderUnsaved(f);
       break;
     }

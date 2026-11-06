@@ -281,15 +281,24 @@ test('Textgerüst: Pausen werden am Ton gemessen, nicht an den gepolsterten Absc
   assert.ok(Math.abs(blocks[1].start - 10) < 0.15 && Math.abs(blocks[1].end - 13.8) < 0.15, JSON.stringify(blocks[1]));
 });
 
-test('Textgerüst: kurzer Einwurf einer zweiten Stimme macht aus dem Block ein Sit', () => {
-  const segs = [
+test('Textgerüst: kurzer Einwurf – nach langem OT fällt er weg, nach kurzem Block wird es ein Sit', () => {
+  const lang = [
     { start: 0, end: 12, text: 'Ich erzähle jetzt ausführlich, wie mein Tag auf dem Hof beginnt.', speaker: 0 },
     { start: 12.2, end: 13, text: 'Ja.', speaker: 1 },
     { start: 13.2, end: 25, text: 'Zuerst füttere ich die Hühner und dann melke ich die Kühe.', speaker: 0 },
   ];
-  const blocks = buildScriptBlocks(segs, { duration: 25 });
-  assert.deepEqual(blocks.map((b) => b.type), ['Sit', 'OT']);
-  assert.match(blocks[0].full, /Ja\.$/);
+  const b1 = buildScriptBlocks(lang, { duration: 25 });
+  assert.deepEqual(b1.map((b) => b.type), ['OT']);
+  assert.deepEqual(b1[0].speakers, [0]);
+  assert.ok(!/Ja\./.test(b1[0].full), b1[0].full);
+  assert.match(b1[0].full, /Kühe\.$/);
+  const kurz = [
+    { start: 0, end: 4, text: 'Hier ist der neue Stall.', speaker: 0 },
+    { start: 4.2, end: 5, text: 'Super!', speaker: 1 },
+  ];
+  const b2 = buildScriptBlocks(kurz, { duration: 5 });
+  assert.deepEqual(b2.map((b) => b.type), ['Sit']);
+  assert.match(b2[0].full, /Super!$/);
 });
 
 test('Kürzen: erste 3 … Schlagwörter … letzte 3, kurze Texte bleiben ganz', () => {
