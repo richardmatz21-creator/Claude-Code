@@ -160,6 +160,98 @@ try {
     assert.match(strFromU8(files['gespraech (2).txt']), /Vorschlag/);
   });
 
+  await step('Text direkt korrigieren: markiert, in SRT und Untertiteln übernommen', async () => {
+    await page.click('#tab-text');
+    const span = page.locator('#transcript .seg[data-seg="1"]');
+    await span.click();
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type('Gerne, am wichtigsten ist uns, dass die Termine früher feststehen.');
+    await page.waitForFunction(() => document.querySelector('#transcript .seg[data-seg="1"]').classList.contains('edited'));
+    assert.equal(await page.isVisible('#seg-tools [data-action="seg-reset"]'), true, 'Knopf „Original“ fehlt');
+    assert.equal(await page.isVisible('#unsaved-hint'), true, 'Hinweis „nicht heruntergeladen“ fehlt');
+    // Enter springt zum nächsten Abschnitt statt eine neue Zeile zu machen.
+    await page.keyboard.press('Enter');
+    assert.equal(await page.evaluate(() => document.activeElement?.dataset?.seg), '2');
+    assert.equal((await span.textContent()).includes('\n'), false);
+    const { data } = await readDownload(() => page.click('[data-action="dl-srt"]'));
+    assert.match(data.toString('utf8'), /Gerne, am wichtigsten/);
+    assert.equal(await page.isVisible('#unsaved-hint'), false, 'Hinweis bleibt nach dem Download');
+    await page.click('#tab-subs');
+    assert.match(await page.textContent('#cues'), /Gerne, am wichtigsten/);
+    await page.click('#tab-text');
+    await shot('6-korrigiert');
+  });
+
+  await step('Original wiederherstellen', async () => {
+    await page.click('#transcript .seg[data-seg="0"]');
+    await page.keyboard.press('End');
+    await page.keyboard.type(' Test');
+    await page.click('#seg-tools [data-action="seg-reset"]');
+    assert.equal(await page.locator('#transcript .seg[data-seg="0"]').getAttribute('class'), 'seg');
+    assert.doesNotMatch(await page.textContent('#transcript .seg[data-seg="0"]'), /Test$/);
+  });
+
+  await step('Anhören: Knopf und Strg+Leertaste spielen genau den Abschnitt ab', async () => {
+    await page.click('#transcript .seg[data-seg="2"]');
+    await page.click('#seg-tools [data-action="seg-play"]');
+    await page.waitForSelector('#transcript .seg[data-seg="2"].playing', { timeout: 5000 });
+    assert.match(await page.textContent('#seg-tools'), /Stopp/);
+    // Der Abschnitt dauert ca. 5 s – danach hört die Wiedergabe von selbst auf.
+    await page.waitForSelector('#transcript .seg.playing', { state: 'detached', timeout: 12000 });
+    await page.click('#transcript .seg[data-seg="3"]');
+    await page.keyboard.press('Control+Space');
+    await page.waitForSelector('#transcript .seg[data-seg="3"].playing', { timeout: 5000 });
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('#transcript .seg.playing', { state: 'detached', timeout: 3000 });
+  });
+
+  await step('Suchen und Ersetzen mit Rückgängig', async () => {
+    await page.click('[data-action="search-toggle"]');
+    await page.fill('#search-q', 'sprechen wir');
+    await page.waitForFunction(() => document.getElementById('search-count').textContent === '2 Treffer');
+    await page.fill('#search-r', 'reden wir');
+    await page.click('#replace-all');
+    await page.waitForFunction(() => document.getElementById('search-count').textContent.includes('2 Stellen ersetzt'));
+    const replaced = await page.textContent('#transcript');
+    assert.equal((replaced.match(/reden wir/g) ?? []).length, 2);
+    await page.click('#replace-undo');
+    const back = await page.textContent('#transcript');
+    assert.equal((back.match(/sprechen wir/g) ?? []).length, 2);
+    assert.equal(back.includes('reden wir'), false);
+    await page.click('[data-action="search-toggle"]');
+  });
+
+  await step('Korrektur-Modus Satz für Satz, Abschnitt leeren entfernt ihn aus TXT', async () => {
+    await page.click('#transcript .seg[data-seg="0"]');
+    await page.click('[data-action="corr-start"]');
+    await page.waitForSelector('#correct:not([hidden])');
+    assert.equal(await page.isVisible('.tabs'), false);
+    assert.equal(await page.textContent('#corr-pos'), 'Abschnitt 1 von 7');
+    assert.match(await page.inputValue('#corr-text'), /Guten Morgen/);
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('ControlOrMeta+Enter');
+    assert.equal(await page.textContent('#corr-pos'), 'Abschnitt 2 von 7');
+    assert.match(await page.inputValue('#corr-text'), /^Gerne, am wichtigsten/, 'frühere Korrektur fehlt');
+    await page.click('#corr-next');
+    await page.fill('#corr-text', 'Das lässt sich machen. Ich schicke Ihnen bis Freitag einen Vorschlag.');
+    assert.equal(await page.isVisible('#corr-orig'), true);
+    await page.click('#corr-next');
+    await page.click('#corr-next');
+    await page.click('#corr-next');
+    await page.click('#corr-next');
+    assert.equal(await page.textContent('#corr-pos'), 'Abschnitt 7 von 7');
+    await page.fill('#corr-text', '');
+    await shot('7-korrektur-modus');
+    await page.click('#corr-next'); // auf dem letzten Abschnitt = Fertig
+    await page.waitForSelector('#correct', { state: 'hidden' });
+    assert.match(await page.textContent('#transcript'), /einen Vorschlag/);
+    assert.match(await page.textContent('#transcript'), /\(entfernt\)|Bescheid/);
+    const { data } = await readDownload(() => page.click('[data-action="dl-txt"]'));
+    const txt = data.toString('utf8');
+    assert.match(txt, /bis Freitag einen Vorschlag/);
+    assert.doesNotMatch(txt, /Vielen Dank und bis bald/, 'geleerter Abschnitt steht noch im TXT');
+  });
+
   await step('Abbrechen bringt zurück zu Schritt 1', async () => {
     await page.click('[data-action="reset"]');
     await page.waitForSelector('#step1:not([hidden])');
@@ -219,6 +311,14 @@ try {
   await step('Keine Anfragen an fremde Server, keine fehlenden Dateien', async () => {
     assert.deepEqual(foreign, [], `fremde Anfragen: ${foreign.join(', ')}`);
     assert.deepEqual(failures, [], `Fehler: ${failures.join(', ')}`);
+  });
+  await step('Warnung beim Schließen, solange Ergebnisse nicht heruntergeladen sind', async () => {
+    let warned = false;
+    page.removeAllListeners('dialog');
+    page.on('dialog', (d) => { if (d.type() === 'beforeunload') warned = true; d.dismiss().catch(() => {}); });
+    await page.close({ runBeforeUnload: true });
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.equal(warned, true, 'keine Warnung beim Schließen');
   });
 } finally {
   await browser.close();

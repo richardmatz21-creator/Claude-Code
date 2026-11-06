@@ -1,7 +1,7 @@
 // Oberfläche: Dateien → Umwandeln → Ergebnis.
 import {
-  SAMPLE_RATE, toSrt, toTxt, toParagraphs, buildCues, speakerTimeline, formatClock, formatSrtTime,
-  baseName, speakerName,
+  SAMPLE_RATE, toSrt, toTxt, buildCues, speakerTimeline, formatClock, formatSrtTime,
+  baseName, speakerName, groupParagraphs, activeSegments, findMatches, countMatches, replaceAll,
 } from './core.js?v=__BUILD__';
 import { zipSync, strToU8 } from './__ASSETS__/vendor/fflate.js';
 
@@ -52,6 +52,10 @@ const state = {
   workerReady: false,
   gpuDisabled: false,
   runId: 0,
+  activeSeg: null,     // Abschnitt, in dem gerade der Cursor steht (Text-Ansicht)
+  correcting: null,    // Nummer des Abschnitts im Korrektur-Modus, sonst null
+  renderedFileId: null,
+  subsDirty: false,
 };
 let nextId = 1;
 let worker = null;
@@ -226,9 +230,12 @@ function onWorkerMessage(msg) {
     case 'result':
       f.status = 'done';
       f.progress = 1;
+      // Originaltext merken, damit Korrekturen markiert und zurückgesetzt werden können.
+      for (const seg of msg.segments) seg.orig = seg.text;
       f.result = { segments: msg.segments, removed: msg.removed, speakers: msg.speakers };
       f.elapsed = msg.seconds;
       f.names = [];
+      f.unsaved = true;
       state.loadInfo = null;
       processNext();
       return;
@@ -423,8 +430,14 @@ function finishCancel() {
 }
 
 function resetAll() {
-  const undownloaded = doneFiles().some((f) => !f.downloaded);
-  if (undownloaded && !confirm('Die bisherigen Ergebnisse werden verworfen. Hast du alles heruntergeladen, was du brauchst?')) return;
+  const unsaved = doneFiles().some((f) => f.unsaved);
+  if (unsaved && !confirm('Die bisherigen Ergebnisse und Korrekturen werden verworfen. Hast du alles heruntergeladen, was du brauchst?')) return;
+  stopPlayback();
+  for (const f of state.files) {
+    if (f.audioUrl && f.status !== 'waiting' && f.status !== 'running') URL.revokeObjectURL(f.audioUrl);
+  }
+  state.correcting = null;
+  state.activeSeg = null;
   state.files = state.files.filter((f) => f.status === 'waiting' || f.status === 'running');
   state.viewId = null;
   state.step = state.running ? 2 : 1;
@@ -450,7 +463,8 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && state.running) requestWakeLock();
 });
 window.addEventListener('beforeunload', (e) => {
-  if (state.running) { e.preventDefault(); e.returnValue = ''; }
+  // Die Seite speichert nichts: warnen, solange umgewandelt wird oder Ergebnisse/Korrekturen nicht heruntergeladen sind.
+  if (state.running || doneFiles().some((f) => f.unsaved)) { e.preventDefault(); e.returnValue = ''; }
 });
 
 // ---------- Darstellung ----------
@@ -639,6 +653,11 @@ function renderResult() {
   renderFailed();
   const f = currentView();
   if (!f) { state.step = state.running ? 2 : 1; render(); return; }
+  if (state.renderedFileId !== f.id) {
+    state.correcting = null;
+    state.activeSeg = null;
+    stopPlayback();
+  }
   state.viewId = f.id;
   const done = doneFiles();
   $('result-files').innerHTML = `<span class="label">Ergebnis für:</span>` + done.map((d) =>
@@ -654,9 +673,17 @@ function renderResult() {
   $('result-sub').textContent = parts.join(' · ');
   $('zip-btn').hidden = done.length < 2;
   $('copy-status').textContent = '';
+  renderUnsaved(f);
   renderTabs();
-  renderTranscript(f);
-  renderSubtitles(f, true);
+  // Nicht neu zeichnen, während jemand im Text tippt (z. B. wenn nebenbei eine andere Datei fertig wird).
+  const typing = $('transcript').contains(document.activeElement) || document.activeElement === $('corr-text');
+  if (!typing || state.renderedFileId !== f.id) {
+    renderTranscript(f);
+    renderSubtitles(f, true);
+  }
+  renderCorrect(f);
+  updateSearch();
+  state.renderedFileId = f.id;
   const note = $('removed-note');
   note.hidden = !f.result.removed;
   note.textContent = f.result.removed === 1
@@ -668,6 +695,14 @@ function renderResult() {
 
 function renderTabs() {
   const text = state.tab === 'text';
+  const correcting = state.correcting !== null;
+  document.querySelector('.tabs').hidden = correcting;
+  $('edit-bar').hidden = correcting;
+  if (correcting) {
+    $('panel-text').hidden = true;
+    $('panel-subs').hidden = true;
+    return;
+  }
   $('tab-text').setAttribute('aria-selected', String(text));
   $('tab-subs').setAttribute('aria-selected', String(!text));
   $('tab-text').tabIndex = text ? 0 : -1;
@@ -676,14 +711,219 @@ function renderTabs() {
   $('panel-subs').hidden = text;
 }
 
+const PLAY_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>';
+const STOP_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>';
+// Reiner-Text-Bearbeitung (keine Formatierung) – Chrome und Edge können das direkt.
+const EDITABLE = (() => {
+  const d = document.createElement('div');
+  d.contentEditable = 'plaintext-only';
+  return d.contentEditable === 'plaintext-only' ? 'plaintext-only' : 'true';
+})();
+function textLang(f) { return f.settings.language === 'auto' ? 'de' : f.settings.language; }
+const isEdited = (seg) => seg.text !== seg.orig;
+
 function renderTranscript(f) {
-  const opts = viewOpts(f);
-  const paras = toParagraphs(f.result.segments, opts);
-  $('transcript').innerHTML = paras.length
-    ? paras.map((p) => p.label
-      ? `<p><span class="who who-label ${spkClass(p.speaker)}">${esc(p.label)}:</span> ${esc(p.text)}</p>`
-      : `<p>${esc(p.text)}</p>`).join('')
-    : '<p class="empty">Es wurde kein gesprochener Text erkannt. Enthält die Datei Sprache?</p>';
+  const groups = groupParagraphs(f.result.segments, viewOpts(f));
+  if (!groups.length) {
+    $('transcript').innerHTML = '<p class="empty">Es wurde kein gesprochener Text erkannt. Enthält die Datei Sprache?</p>';
+    return;
+  }
+  const lang = textLang(f);
+  $('transcript').innerHTML = groups.map((g) => {
+    const label = g.label ? `<span class="who who-label ${spkClass(g.speaker)}">${esc(g.label)}:</span> ` : '';
+    const segs = g.items.map(({ index, seg }) => `<span class="seg${isEdited(seg) ? ' edited' : ''}" contenteditable="${EDITABLE}" spellcheck="true" lang="${lang}" role="textbox" aria-label="Abschnitt ${index + 1}, ${formatClock(seg.start)} bis ${formatClock(seg.end)}" data-seg="${index}">${esc(seg.text)}</span>`).join(' ');
+    return `<p>${label}${segs}</p>`;
+  }).join('');
+  if (state.activeSeg !== null) showSegTools(f, state.activeSeg);
+  applySearchHighlight();
+}
+
+function segSpan(index) { return $('transcript').querySelector(`.seg[data-seg="${index}"]`); }
+
+// Kleine Werkzeugleiste (Anhören, Original) direkt hinter dem Abschnitt, in dem der Cursor steht.
+function showSegTools(f, index) {
+  $('seg-tools')?.remove();
+  const span = segSpan(index);
+  const seg = f.result.segments[index];
+  if (!span || !seg) return;
+  const playing = isPlaying(f.id, index);
+  const tools = document.createElement('span');
+  tools.id = 'seg-tools';
+  tools.className = 'seg-tools';
+  tools.contentEditable = 'false';
+  tools.innerHTML = `<button type="button" class="tool-btn" data-action="seg-play" aria-label="${playing ? 'Abspielen stoppen' : `Abschnitt ${index + 1} anhören`}">${playing ? STOP_ICON + 'Stopp' : PLAY_ICON + 'Anhören'}</button>`
+    + (isEdited(seg) ? '<button type="button" class="tool-btn" data-action="seg-reset">Original</button>' : '');
+  span.after(tools);
+}
+
+function onSegmentEdited(f, index, text) {
+  const seg = f.result.segments[index];
+  seg.text = text.replace(/[\r\n]+/g, ' ');
+  f.unsaved = true;
+  state.subsDirty = true;
+  renderUnsaved(f);
+  updateSearch(false);
+}
+
+function renderUnsaved(f) {
+  $('unsaved-hint').hidden = !(f.unsaved && f.result.segments.some(isEdited));
+}
+
+// ---------- Korrektur-Modus: Abschnitt für Abschnitt ----------
+
+function renderCorrect(f) {
+  const panel = $('correct');
+  if (state.correcting === null) { panel.hidden = true; return; }
+  const segs = f.result.segments;
+  const i = Math.max(0, Math.min(state.correcting, segs.length - 1));
+  state.correcting = i;
+  const seg = segs[i];
+  panel.hidden = false;
+  $('corr-pos').textContent = `Abschnitt ${i + 1} von ${segs.length}`;
+  const who = f.result.speakers > 0 ? `${speakerName(f.names, seg.speaker ?? 0)} · ` : '';
+  $('corr-meta').textContent = `${who}${formatClock(seg.start)} – ${formatClock(seg.end)}`;
+  const ta = $('corr-text');
+  ta.lang = textLang(f);
+  ta.spellcheck = true;
+  if (document.activeElement !== ta || ta.dataset.seg !== String(i)) ta.value = seg.text;
+  ta.dataset.seg = String(i);
+  renderCorrectOrig(seg);
+  $('corr-prev').disabled = i === 0;
+  const last = i === segs.length - 1;
+  $('corr-next').textContent = last ? 'Fertig' : 'Weiter →';
+  $('corr-done').hidden = last;
+  const playing = isPlaying(f.id, i);
+  $('corr-play').innerHTML = playing ? `${STOP_ICON} Stopp` : `${PLAY_ICON} Anhören`;
+}
+
+function renderCorrectOrig(seg) {
+  $('corr-orig').hidden = !isEdited(seg);
+  $('corr-orig-text').textContent = `Original: ${seg.orig}`;
+}
+
+function startCorrecting(f, index) {
+  state.correcting = index ?? state.activeSeg ?? 0;
+  renderTabs();
+  renderCorrect(f);
+  $('correct').scrollIntoView({ block: 'start', behavior: 'smooth' });
+  $('corr-text').focus();
+  if ($('corr-auto').checked) playSegment(f, state.correcting);
+}
+
+function moveCorrecting(f, delta) {
+  const next = state.correcting + delta;
+  if (next < 0) return;
+  if (next >= f.result.segments.length) { stopCorrecting(f); return; }
+  state.correcting = next;
+  renderCorrect(f);
+  $('corr-text').focus();
+  if ($('corr-auto').checked) playSegment(f, next);
+  else stopPlayback();
+}
+
+function stopCorrecting(f) {
+  const last = state.correcting;
+  state.correcting = null;
+  stopPlayback();
+  renderTabs();
+  renderTranscript(f);
+  if (state.subsDirty) { renderSubtitles(f, false); state.subsDirty = false; }
+  renderCorrect(f);
+  segSpan(last)?.scrollIntoView({ block: 'center' });
+}
+
+// ---------- Anhören ----------
+
+const player = new Audio();
+player.preload = 'auto';
+let playback = null; // { fileId, index, stopAt }
+
+function isPlaying(fileId, index) {
+  return playback && playback.fileId === fileId && playback.index === index && !player.paused;
+}
+
+function refreshPlayButtons() {
+  const f = currentView();
+  if (!f || state.step !== 3) return;
+  for (const el of $('transcript').querySelectorAll('.seg.playing')) el.classList.remove('playing');
+  if (playback && !player.paused && playback.fileId === f.id) segSpan(playback.index)?.classList.add('playing');
+  if (state.activeSeg !== null && $('seg-tools')) showSegTools(f, state.activeSeg);
+  if (state.correcting !== null) {
+    $('corr-play').innerHTML = isPlaying(f.id, state.correcting) ? `${STOP_ICON} Stopp` : `${PLAY_ICON} Anhören`;
+  }
+}
+
+function stopPlayback() {
+  if (!player.paused) player.pause();
+  playback = null;
+  refreshPlayButtons();
+}
+
+async function playSegment(f, index) {
+  const seg = f.result.segments[index];
+  if (!seg) return;
+  if (isPlaying(f.id, index)) { stopPlayback(); return; }
+  try {
+    if (!f.audioUrl) f.audioUrl = URL.createObjectURL(f.file);
+    if (player.src !== f.audioUrl) {
+      player.src = f.audioUrl;
+      await new Promise((resolve, reject) => {
+        player.addEventListener('loadedmetadata', resolve, { once: true });
+        player.addEventListener('error', reject, { once: true });
+      });
+    }
+    player.currentTime = Math.max(0, seg.start - 0.2);
+    playback = { fileId: f.id, index, stopAt: seg.end + 0.25 };
+    await player.play();
+    refreshPlayButtons();
+    const tick = () => {
+      if (!playback || player.paused) return;
+      if (player.currentTime >= playback.stopAt) { stopPlayback(); return; }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  } catch {
+    playback = null;
+    $('copy-status').textContent = 'Diese Datei kann der Browser leider nicht abspielen. Korrigieren geht trotzdem.';
+    refreshPlayButtons();
+  }
+}
+player.addEventListener('ended', () => { playback = null; refreshPlayButtons(); });
+player.addEventListener('pause', () => refreshPlayButtons());
+
+// ---------- Suchen und Ersetzen ----------
+
+function updateSearch(rerenderHighlight = true) {
+  const f = currentView();
+  const open = !$('search-bar').hidden;
+  const q = $('search-q').value;
+  if (!f || !open) { if ('highlights' in CSS) CSS.highlights.delete('suche'); return; }
+  const n = q ? countMatches(f.result.segments, q) : 0;
+  $('search-count').textContent = !q ? '' : n === 1 ? '1 Treffer' : `${n} Treffer`;
+  $('replace-all').disabled = n === 0;
+  if (rerenderHighlight) applySearchHighlight();
+  else applySearchHighlight();
+}
+
+// Treffer farbig markieren, ohne den Text zu verändern (CSS Custom Highlight API).
+function applySearchHighlight() {
+  if (!('highlights' in CSS) || typeof Highlight !== 'function') return;
+  CSS.highlights.delete('suche');
+  const q = $('search-q').value;
+  if (!q || $('search-bar').hidden) return;
+  const ranges = [];
+  for (const span of $('transcript').querySelectorAll('.seg')) {
+    const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      for (const [a, b] of findMatches(node.data, q)) {
+        const r = new Range();
+        r.setStart(node, a);
+        r.setEnd(node, b);
+        ranges.push(r);
+      }
+    }
+  }
+  if (ranges.length) CSS.highlights.set('suche', new Highlight(...ranges));
 }
 
 function renderSubtitles(f, withInputs = false) {
@@ -695,7 +935,7 @@ function renderSubtitles(f, withInputs = false) {
   if (nSpk > 0) {
     $('legend').innerHTML = Array.from({ length: nSpk }, (_, i) =>
       `<span><span class="dot ${spkClass(i)}"></span>${esc(speakerName(f.names, i))}</span>`).join('');
-    $('timeline').innerHTML = speakerTimeline(f.result.segments).map((t) =>
+    $('timeline').innerHTML = speakerTimeline(activeSegments(f.result.segments)).map((t) =>
       `<span class="${spkClass(t.speaker)}" style="left:${(t.start / total) * 100}%;width:${Math.max(0.3, ((t.end - t.start) / total) * 100)}%"></span>`).join('');
     const marks = [0, 0.25, 0.5, 0.75, 1].map((r) => `<span>${formatClock(total * r)}</span>`);
     $('timeline-scale').innerHTML = marks.join('');
@@ -708,7 +948,7 @@ function renderSubtitles(f, withInputs = false) {
     }
   }
   // Gleiche Aufteilung wie in der SRT-Datei; der Name wird hier nur getrennt angezeigt.
-  const cues = buildCues(f.result.segments, { ...opts, labelInText: false });
+  const cues = buildCues(activeSegments(f.result.segments), { ...opts, labelInText: false });
   $('cues').innerHTML = cues.length ? cues.map((c, i) => `
     <article class="cue">
       <span class="cue-no">${i + 1}</span>
@@ -724,8 +964,9 @@ function renderSubtitles(f, withInputs = false) {
 
 // ---------- Ergebnis-Aktionen ----------
 
-function srtFor(f) { return toSrt(f.result.segments, viewOpts(f)); }
-function txtFor(f) { return toTxt(f.result.segments, viewOpts(f)); }
+// Geleerte Abschnitte fallen aus den Dateien heraus.
+function srtFor(f) { return toSrt(activeSegments(f.result.segments), viewOpts(f)); }
+function txtFor(f) { return toTxt(activeSegments(f.result.segments), viewOpts(f)); }
 
 function uniqueNames(files, ext) {
   const used = new Map();
@@ -762,6 +1003,7 @@ async function onAction(action, id) {
       render();
       break;
     case 'view':
+      if (state.viewId !== Number(id)) $('replace-undo').hidden = true;
       state.viewId = Number(id);
       state.step = 3;
       render();
@@ -783,12 +1025,14 @@ async function onAction(action, id) {
     case 'dl-srt':
       if (!f) return;
       downloadBlob(uniqueNames([f], 'srt')[0], new Blob([BOM + srtFor(f)], { type: 'application/x-subrip;charset=utf-8' }));
-      f.downloaded = true;
+      f.unsaved = false;
+      renderUnsaved(f);
       break;
     case 'dl-txt':
       if (!f) return;
       downloadBlob(uniqueNames([f], 'txt')[0], new Blob([BOM + txtFor(f)], { type: 'text/plain;charset=utf-8' }));
-      f.downloaded = true;
+      f.unsaved = false;
+      renderUnsaved(f);
       break;
     case 'dl-zip': {
       const done = doneFiles();
@@ -798,15 +1042,95 @@ async function onAction(action, id) {
       done.forEach((d, i) => {
         entries[srtNames[i]] = strToU8(BOM + srtFor(d));
         entries[txtNames[i]] = strToU8(BOM + txtFor(d));
-        d.downloaded = true;
+        d.unsaved = false;
       });
+      if (f) renderUnsaved(f);
       downloadBlob('transkripte.zip', new Blob([zipSync(entries, { level: 6 })], { type: 'application/zip' }));
       break;
     }
     case 'copy':
       if (!f) return;
-      $('copy-status').textContent = (await copyText(txtFor(f))) ? 'Text kopiert.' : 'Kopieren hat nicht geklappt. Bitte „Text (TXT)“ verwenden.';
+      if (await copyText(txtFor(f))) {
+        $('copy-status').textContent = 'Text kopiert.';
+        f.unsaved = false;
+        renderUnsaved(f);
+      } else {
+        $('copy-status').textContent = 'Kopieren hat nicht geklappt. Bitte „Text (TXT)“ verwenden.';
+      }
       break;
+    case 'seg-play':
+      if (f && state.activeSeg !== null) playSegment(f, state.activeSeg);
+      break;
+    case 'seg-reset': {
+      if (!f || state.activeSeg === null) return;
+      const seg = f.result.segments[state.activeSeg];
+      onSegmentEdited(f, state.activeSeg, seg.orig);
+      const span = segSpan(state.activeSeg);
+      if (span) { span.textContent = seg.orig; span.classList.remove('edited'); span.focus(); }
+      showSegTools(f, state.activeSeg);
+      applySearchHighlight();
+      break;
+    }
+    case 'corr-start':
+      if (f) startCorrecting(f);
+      break;
+    case 'corr-prev':
+      if (f) moveCorrecting(f, -1);
+      break;
+    case 'corr-next':
+      if (f) moveCorrecting(f, +1);
+      break;
+    case 'corr-done':
+      if (f) stopCorrecting(f);
+      break;
+    case 'corr-play':
+      if (f && state.correcting !== null) playSegment(f, state.correcting);
+      break;
+    case 'corr-reset': {
+      if (!f || state.correcting === null) return;
+      const seg = f.result.segments[state.correcting];
+      onSegmentEdited(f, state.correcting, seg.orig);
+      $('corr-text').value = seg.orig;
+      renderCorrectOrig(seg);
+      $('corr-text').focus();
+      break;
+    }
+    case 'search-toggle': {
+      const bar = $('search-bar');
+      bar.hidden = !bar.hidden;
+      $('search-toggle').setAttribute('aria-expanded', String(!bar.hidden));
+      if (!bar.hidden) $('search-q').focus();
+      updateSearch();
+      break;
+    }
+    case 'replace-all': {
+      if (!f) return;
+      const q = $('search-q').value;
+      f.undo = f.result.segments.map((s) => s.text);
+      const n = replaceAll(f.result.segments, q, $('search-r').value);
+      if (!n) { f.undo = null; return; }
+      f.unsaved = true;
+      renderTranscript(f);
+      renderSubtitles(f, false);
+      renderUnsaved(f);
+      updateSearch();
+      $('search-count').textContent = n === 1 ? '1 Stelle ersetzt.' : `${n} Stellen ersetzt.`;
+      $('replace-undo').hidden = false;
+      break;
+    }
+    case 'replace-undo': {
+      if (!f || !f.undo) return;
+      f.result.segments.forEach((s, i) => { s.text = f.undo[i]; });
+      f.undo = null;
+      f.unsaved = true;
+      renderTranscript(f);
+      renderSubtitles(f, false);
+      renderUnsaved(f);
+      $('replace-undo').hidden = true;
+      updateSearch();
+      $('search-count').textContent = 'Ersetzen rückgängig gemacht.';
+      break;
+    }
   }
 }
 
@@ -851,15 +1175,107 @@ function bind() {
   $('set-speakers').addEventListener('change', (e) => { state.settings.speakers = e.target.value; saveSettings(); });
 
   for (const tab of [$('tab-text'), $('tab-subs')]) {
-    tab.addEventListener('click', () => { state.tab = tab.id === 'tab-text' ? 'text' : 'subs'; renderTabs(); });
+    tab.addEventListener('click', () => {
+      state.tab = tab.id === 'tab-text' ? 'text' : 'subs';
+      const f = currentView();
+      if (f && state.tab === 'subs' && state.subsDirty) { renderSubtitles(f, false); state.subsDirty = false; }
+      renderTabs();
+    });
     tab.addEventListener('keydown', (e) => {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
       e.preventDefault();
       state.tab = state.tab === 'text' ? 'subs' : 'text';
+      const f = currentView();
+      if (f && state.tab === 'subs' && state.subsDirty) { renderSubtitles(f, false); state.subsDirty = false; }
       renderTabs();
       (state.tab === 'text' ? $('tab-text') : $('tab-subs')).focus();
     });
   }
+
+  // Text direkt bearbeiten
+  const tr = $('transcript');
+  tr.addEventListener('focusin', (e) => {
+    const span = e.target.closest?.('.seg');
+    const f = currentView();
+    if (!span || !f) return;
+    state.activeSeg = Number(span.dataset.seg);
+    showSegTools(f, state.activeSeg);
+  });
+  tr.addEventListener('input', (e) => {
+    const span = e.target.closest?.('.seg');
+    const f = currentView();
+    if (!span || !f) return;
+    const index = Number(span.dataset.seg);
+    onSegmentEdited(f, index, span.textContent);
+    const edited = isEdited(f.result.segments[index]);
+    if (span.classList.contains('edited') !== edited) {
+      span.classList.toggle('edited', edited);
+      showSegTools(f, index);
+    }
+  });
+  tr.addEventListener('keydown', (e) => {
+    const span = e.target.closest?.('.seg');
+    const f = currentView();
+    if (!span || !f || e.isComposing) return;
+    const index = Number(span.dataset.seg);
+    if ((e.ctrlKey || e.metaKey) && (e.key === ' ' || e.code === 'Space')) {
+      e.preventDefault();
+      playSegment(f, index);
+    } else if (e.key === 'Enter') {
+      // Kein Zeilenumbruch im Abschnitt: weiter zum nächsten Abschnitt.
+      e.preventDefault();
+      const next = segSpan(index + 1);
+      if (next) {
+        next.focus();
+        const sel = getSelection();
+        sel.selectAllChildren(next);
+        sel.collapseToEnd();
+      } else {
+        span.blur();
+      }
+    } else if (e.key === 'Escape') {
+      stopPlayback();
+    }
+  });
+  tr.addEventListener('paste', (e) => {
+    if (!e.target.closest?.('.seg')) return;
+    // Nur reinen Text einfügen, ohne Formatierung und Zeilenumbrüche.
+    e.preventDefault();
+    const text = (e.clipboardData?.getData('text/plain') ?? '').replace(/[\r\n]+/g, ' ');
+    document.execCommand('insertText', false, text);
+  });
+  // Werkzeug-Knöpfe sollen den Cursor nicht aus dem Text nehmen.
+  tr.addEventListener('mousedown', (e) => {
+    if (e.target.closest?.('.seg-tools')) e.preventDefault();
+  });
+
+  // Korrektur-Modus
+  $('corr-text').addEventListener('input', (e) => {
+    const f = currentView();
+    if (!f || state.correcting === null) return;
+    onSegmentEdited(f, state.correcting, e.target.value);
+    renderCorrectOrig(f.result.segments[state.correcting]);
+  });
+  $('corr-text').addEventListener('keydown', (e) => {
+    const f = currentView();
+    if (!f || state.correcting === null) return;
+    if ((e.ctrlKey || e.metaKey) && (e.key === ' ' || e.code === 'Space')) {
+      e.preventDefault();
+      playSegment(f, state.correcting);
+    } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      moveCorrecting(f, +1);
+    } else if (e.key === 'Enter') {
+      e.preventDefault(); // ein Abschnitt hat keine Zeilenumbrüche
+    } else if (e.key === 'Escape') {
+      stopPlayback();
+    }
+  });
+
+  // Suchen und Ersetzen
+  $('search-q').addEventListener('input', () => { $('replace-undo').hidden = true; updateSearch(); });
+  $('search-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('search-r').focus(); } });
+  $('search-r').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !$('replace-all').disabled) { e.preventDefault(); onAction('replace-all'); } });
 
   $('names').addEventListener('input', (e) => {
     const i = e.target.dataset?.speaker;
