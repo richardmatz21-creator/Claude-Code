@@ -740,27 +740,27 @@ export function buildScriptBlocks(segments, {
   // Fehlende Sprecher-Angabe einheitlich als null (undefined und null sind dieselbe „unbekannte“ Stimme)
   const sorted = activeSegments(segments).map((s) => ({ ...s, speaker: s.speaker ?? null })).sort((a, b) => a.start - b.start);
   const ignored = []; // Abschnitte, die nicht als Sprache zählen
-  // Zuschneiden; ein Nachbar, der Liedtext ist, gilt dabei nie als dieselbe Person
-  const trim = (i, lyric) => {
+  // Zuschneiden; sameOk = ob ein Nachbar derselben Person die längere Schwelle bekommt
+  const trim = (i, sameOk) => {
     const s = sorted[i];
     if (!regions) return levels?.length ? trimToSpeech(s, levels, threshold) : s;
     const pv = sorted[i - 1] ?? null, nx = sorted[i + 1] ?? null;
-    const gapTo = (nb, j) => (nb && !lyric.has(j) && samePerson(nb, s) ? sameGap : offGap);
+    const gapTo = (nb, j) => (nb && sameOk(j) && samePerson(nb, s) ? sameGap : offGap);
     return trimToRegions(s, regions, pv, nx, gapTo(pv, i - 1), gapTo(nx, i + 1));
   };
-  // 1. Durchgang: Abschnitte ohne Stimme finden (z. B. von Whisper erfunden unter Musik)
-  const first = sorted.map((_, i) => trim(i, new Set()));
-  // 2. Englische Liedtexte an den geschnittenen Grenzen erkennen: Sie sind Musik, auch wenn die
+  // 1. Durchgang mit der OFF-Länge zu beiden Seiten: Abschnitte ohne Stimme finden (z. B. von
+  //    Whisper erfunden unter Musik) und englische Liedtexte erkennen – sie sind Musik, auch wenn die
   //    Sprecher-Erkennung ihnen eine Stimme zuordnet
+  const first = sorted.map((_, i) => trim(i, () => false));
   const voiced = sorted.map((_, i) => i).filter((i) => first[i]);
   const lyric = new Set();
   if (language === 'de') for (const k of findForeignLyrics(voiced.map((i) => first[i]))) lyric.add(voiced[k]);
-  // 3. Nachbarn von Liedtext neu zuschneiden (der Liedtext ist nicht dieselbe Person)
+  // 2. Endgültig zuschneiden: zu Nachbarn derselben Person mit der längeren Schwelle, Liedtext gilt
+  //    nie als dieselbe Person
   let segs = [];
   sorted.forEach((s, i) => {
     if (!first[i] || lyric.has(i)) { ignored.push(s); return; }
-    const near = lyric.has(i - 1) || lyric.has(i + 1);
-    segs.push(near ? (trim(i, lyric) ?? first[i]) : first[i]);
+    segs.push(trim(i, (j) => !lyric.has(j)) ?? first[i]);
   });
   segs.sort((a, b) => a.start - b.start);
   // Pause zwischen zwei Beiträgen: zwischen den zugeschnittenen Abschnittsgrenzen. Bewusst nicht die
@@ -779,9 +779,10 @@ export function buildScriptBlocks(segments, {
       last.spoken += Math.max(0, s.end - Math.max(s.start, last.end)); // Überlappung nicht doppelt
       last.end = Math.max(last.end, s.end);
       last.ownEnd = last.end;
+      last.parts.push([s.start, s.end]);
       last.texts.push(s.text.trim());
     } else {
-      turns.push({ speaker: s.speaker, start: s.start, end: s.end, ownEnd: s.end, spoken: s.end - s.start, texts: [s.text.trim()] });
+      turns.push({ speaker: s.speaker, start: s.start, end: s.end, ownEnd: s.end, spoken: s.end - s.start, parts: [[s.start, s.end]], texts: [s.text.trim()] });
     }
   }
   if (!turns.length) {
@@ -808,9 +809,12 @@ export function buildScriptBlocks(segments, {
     if (isInterjection(t) && !hasQuestion(t) && p.speaker !== t.speaker && isLong(p) && !isPause(gap(p, t))) {
       turns.splice(k, 1);
       const n = turns[k];
-      // Die Zeit des Einwurfs gehört zum OT (sonst entstünde dort ein falsches OFF). Ob dieselbe
-      // Person weiterspricht, misst sich aber an ihrer eigenen Pause, als gäbe es den Einwurf nicht.
-      p.end = Math.max(p.end, t.end);
+      // Die Zeit des Einwurfs gehört zum OT (sonst entstünde dort ein falsches OFF) – aber nur bis
+      // zur ersten OFF-langen Pause darin. Ob dieselbe Person weiterspricht, misst sich an ihrer
+      // eigenen Pause, als gäbe es den Einwurf nicht.
+      let reach = t.parts[0][1];
+      for (const [a, b] of t.parts.slice(1)) { if (isPause(a - reach)) break; reach = Math.max(reach, b); }
+      p.end = Math.max(p.end, reach);
       if (n && n.speaker === p.speaker) {
         if (!offAfter(p, n, n.start - p.ownEnd)) {
           p.end = Math.max(p.end, n.end);

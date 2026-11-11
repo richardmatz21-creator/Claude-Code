@@ -421,6 +421,20 @@ test('Textgerüst: spricht dieselbe Person weiter, gibt es erst ab 8 s Pause ein
   // Eine Frage mitten im Abschnitt („Wirklich? Ja.“) ist kein Einwurf und geht nicht verloren
   const mitte = buildScriptBlocks([lang, { start: 12.2, end: 13, text: 'Wirklich? Ja.', speaker: 1 }, { ...dann(13.3), end: 25 }], { duration: 25 });
   assert.ok(mitte.some((b) => /Wirklich\?/.test(b.full)), JSON.stringify(mitte.map((b) => b.full)));
+  // Ein Einwurf aus zwei Teilen mit langer Pause dazwischen verlängert das OT nicht über die Stille
+  const zweiteilig = buildScriptBlocks([
+    { start: 0, end: 12, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 },
+    { start: 12.2, end: 12.5, text: 'Ja.', speaker: 1 },
+    { start: 19.5, end: 19.8, text: 'Mhm.', speaker: 1 },
+    { start: 20, end: 28, text: 'Ich bringe euch gleich noch ein Stück zum Probieren.', speaker: 2 },
+  ], { duration: 28 });
+  assert.equal(zweiteilig[0].end, 12.5);
+  assert.equal(zweiteilig[1].type, 'OFF');
+  // „…?…“ am Ende ist auch eine Frage
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 2, text: 'Und dann?…', speaker: 0 },
+    { start: 2.8, end: 14, text: 'Dann sind wir mit dem Boot ganz langsam bis zur kleinen Insel in der Mitte gefahren.', speaker: 1 },
+  ], { duration: 14 }).map((b) => b.type), ['Sit']);
   // „…?!“ am Ende ist eine Frage: mit ihrer Antwort ein Sit
   assert.deepEqual(buildScriptBlocks([
     { start: 0, end: 2, text: 'Hast du das gesehen?!', speaker: 0 },
@@ -664,6 +678,21 @@ test('Textgerüst: englischer Liedtext in der Musik zählt nicht als Sprache', (
     { start: 15, end: 25, text: 'Das hat unser Nachbar immer gesagt, wenn das Wetter wieder umgeschlagen ist.', speaker: 0 },
   ], { duration: 25, speech: [[0, 10], [12.5, 14], [15, 25]] });
   assert.ok(zitatNeben.some((b) => b.type !== 'OFF' && /You never know/.test(b.full)), JSON.stringify(zitatNeben.map((b) => [b.type, b.full])));
+  // Dasselbe, wenn die Sprecher-Erkennung dem Lied dieselbe Stimme gibt wie dem Satz davor bzw. danach
+  const gleich = buildScriptBlocks([
+    { start: 0, end: 6, text: 'Jetzt kommt das Lied von The Beatles.', speaker: 0 },
+    { start: 6, end: 8, text: 'And we keep running to the river', speaker: 0 },
+    { start: 8, end: 10, text: 'They will never know my name', speaker: 0 },
+    { start: 14, end: 22, text: 'Danach haben wir noch lange zusammen am Feuer gesessen und geredet.', speaker: 1 },
+  ], { duration: 22, speech: [[0, 2.6], [5.4, 10], [14, 22]] });
+  assert.deepEqual(gleich.map((b) => [b.type, b.start, b.end]), [['OT', 0, 2.6], ['OFF', 2.6, 14], ['OT', 14, 22]]);
+  const gleichDanach = buildScriptBlocks([
+    { start: 0, end: 8, text: 'Heute Abend grillen wir hinten im Garten mit der ganzen Familie.', speaker: 1 },
+    { start: 10, end: 12, text: 'And we keep running to the river', speaker: 0 },
+    { start: 12, end: 14, text: 'They will never know my name', speaker: 0 },
+    { start: 14, end: 20, text: 'Das Lied ist von The Beatles.', speaker: 0 },
+  ], { duration: 20, speech: [[0, 8], [10, 14.6], [17.4, 20]] });
+  assert.ok(gleichDanach.some((b) => b.type !== 'OFF' && /Beatles/.test(b.full)), JSON.stringify(gleichDanach.map((b) => [b.type, b.full])));
   // Bei englischer Aufnahme bleibt alles
   assert.ok(buildScriptBlocks(segs, { duration: 32, language: 'en' }).some((b) => /river/.test(b.full)));
   // Ein einzelner englischer Satz (Zitat) bleibt
