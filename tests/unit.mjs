@@ -430,6 +430,20 @@ test('Textgerüst: spricht dieselbe Person weiter, gibt es erst ab 8 s Pause ein
   ], { duration: 28 });
   assert.equal(zweiteilig[0].end, 12.5);
   assert.equal(zweiteilig[1].type, 'OFF');
+  // Ein Einwurf aus drei kurzen Teilen ohne lange Pause: kein falsches OFF
+  const dreiteilig = buildScriptBlocks([
+    { start: 0, end: 12, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 },
+    { start: 12.2, end: 12.5, text: 'Ja.', speaker: 1 },
+    { start: 13.5, end: 13.8, text: 'Mhm.', speaker: 1 },
+    { start: 15, end: 15.3, text: 'Gut.', speaker: 1 },
+    { start: 16, end: 24, text: 'Ich bringe euch gleich noch ein Stück zum Probieren.', speaker: 2 },
+  ], { duration: 24 });
+  assert.ok(!dreiteilig.some((b) => b.type === 'OFF'), JSON.stringify(dreiteilig.map((b) => [b.type, b.start, b.end])));
+  // Endet der Beitrag nicht mit einer Frage, wird er mit einer langen Antwort kein Sit
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 2.5, text: 'Wirklich? Das glaube ich nicht.', speaker: 0 },
+    { start: 3, end: 14, text: 'Doch, wir haben letztes Jahr wirklich über zweihundert Gläser Honig verkauft.', speaker: 1 },
+  ], { duration: 14 }).map((b) => b.type), ['OT', 'OT']);
   // „…?…“ am Ende ist auch eine Frage
   assert.deepEqual(buildScriptBlocks([
     { start: 0, end: 2, text: 'Und dann?…', speaker: 0 },
@@ -598,7 +612,9 @@ test('Textgerüst: Abschnitt ohne erkannte Stimme zählt nicht, bleibt aber als 
   assert.equal(blocks[1].ignored, 'Bis zum nächsten Mal.');
   assert.equal(blocks[0].ignored, undefined);
   // Ohne Sprach-Zeitleiste bleibt der Abschnitt Sprache
-  assert.deepEqual(buildScriptBlocks(segs, { duration: 14 }).map((b) => b.type), ['OT', 'OFF']);
+  const ohneZeit = buildScriptBlocks(segs, { duration: 14 });
+  assert.deepEqual(ohneZeit.map((b) => b.type), ['OT', 'OFF']);
+  assert.match(ohneZeit[0].full, /Bis zum nächsten Mal\.$/);
   // Nur weggelassener Text: ein OFF über alles, mit Hinweis
   const nur = buildScriptBlocks([segs[1]], { duration: 1.5, speech: [[20, 21]] });
   assert.deepEqual(nur.map((b) => [b.type, b.ignored]), [['OFF', 'Bis zum nächsten Mal.']]);
