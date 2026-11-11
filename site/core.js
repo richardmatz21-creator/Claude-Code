@@ -740,18 +740,27 @@ export function buildScriptBlocks(segments, {
   // Fehlende Sprecher-Angabe einheitlich als null (undefined und null sind dieselbe „unbekannte“ Stimme)
   const sorted = activeSegments(segments).map((s) => ({ ...s, speaker: s.speaker ?? null })).sort((a, b) => a.start - b.start);
   const ignored = []; // Abschnitte, die nicht als Sprache zählen
-  // Englische Liedtexte zuerst erkennen: Sie sind Musik, auch wenn die Sprecher-Erkennung ihnen
-  // eine Stimme zuordnet, und gelten beim Zuschneiden der Nachbarn nicht als dieselbe Person.
-  const lyricIdx = language === 'de' ? findForeignLyrics(sorted) : new Set();
+  // Zuschneiden; ein Nachbar, der Liedtext ist, gilt dabei nie als dieselbe Person
+  const trim = (i, lyric) => {
+    const s = sorted[i];
+    if (!regions) return levels?.length ? trimToSpeech(s, levels, threshold) : s;
+    const pv = sorted[i - 1] ?? null, nx = sorted[i + 1] ?? null;
+    const gapTo = (nb, j) => (nb && !lyric.has(j) && samePerson(nb, s) ? sameGap : offGap);
+    return trimToRegions(s, regions, pv, nx, gapTo(pv, i - 1), gapTo(nx, i + 1));
+  };
+  // 1. Durchgang: Abschnitte ohne Stimme finden (z. B. von Whisper erfunden unter Musik)
+  const first = sorted.map((_, i) => trim(i, new Set()));
+  // 2. Englische Liedtexte an den geschnittenen Grenzen erkennen: Sie sind Musik, auch wenn die
+  //    Sprecher-Erkennung ihnen eine Stimme zuordnet
+  const voiced = sorted.map((_, i) => i).filter((i) => first[i]);
+  const lyric = new Set();
+  if (language === 'de') for (const k of findForeignLyrics(voiced.map((i) => first[i]))) lyric.add(voiced[k]);
+  // 3. Nachbarn von Liedtext neu zuschneiden (der Liedtext ist nicht dieselbe Person)
   let segs = [];
   sorted.forEach((s, i) => {
-    if (lyricIdx.has(i)) { ignored.push(s); return; }
-    if (!regions) { segs.push(levels?.length ? trimToSpeech(s, levels, threshold) : s); return; }
-    const pv = sorted[i - 1] ?? null, nx = sorted[i + 1] ?? null;
-    const gapTo = (nb, j) => (nb && !lyricIdx.has(j) && samePerson(nb, s) ? sameGap : offGap);
-    const t = trimToRegions(s, regions, pv, nx, gapTo(pv, i - 1), gapTo(nx, i + 1));
-    if (t) segs.push(t);
-    else ignored.push(s); // keine Stimme erkannt (z. B. von Whisper erfunden unter Musik)
+    if (!first[i] || lyric.has(i)) { ignored.push(s); return; }
+    const near = lyric.has(i - 1) || lyric.has(i + 1);
+    segs.push(near ? (trim(i, lyric) ?? first[i]) : first[i]);
   });
   segs.sort((a, b) => a.start - b.start);
   // Pause zwischen zwei Beiträgen: zwischen den zugeschnittenen Abschnittsgrenzen. Bewusst nicht die
@@ -784,9 +793,11 @@ export function buildScriptBlocks(segments, {
   // Lang/kurz an der gesprochenen Zeit: Länge der Abschnitte, ohne die Pausen dazwischen
   const isLong = (t) => t.spoken >= longTurn;
   const isInterjection = (t) => t.spoken < 2 && wordCount(textOf(t)) <= 3;
-  const QUESTION = /\?["“”»«']?$/;
-  const isQuestion = (t) => QUESTION.test(t.texts.at(-1) ?? '');
-  const hasQuestion = (t) => t.texts.some((x) => QUESTION.test(x));
+  // Ein Beitrag mit „?“ irgendwo ist nie ein Einwurf (Whisper fasst „Wirklich? Ja.“ oft zusammen).
+  // Mit seiner Antwort ins Sit kommt ein Beitrag, der mit einer Frage endet („…?“, „…?!“, „…?…“) –
+  // so passte es beim Vergleich mit echten Textgerüsten besser.
+  const hasQuestion = (t) => t.texts.some((x) => x.includes('?'));
+  const isQuestion = (t) => /\?[!?…."“”»«']*$/.test(t.texts.at(-1) ?? '');
 
   // Ein kurzer Einwurf einer anderen Stimme („Ja.“) direkt nach einem langen Beitrag fällt weg –
   // der lange Beitrag bleibt ein OT; spricht dieselbe Person danach weiter, wird es ein OT.
@@ -800,12 +811,16 @@ export function buildScriptBlocks(segments, {
       // Die Zeit des Einwurfs gehört zum OT (sonst entstünde dort ein falsches OFF). Ob dieselbe
       // Person weiterspricht, misst sich aber an ihrer eigenen Pause, als gäbe es den Einwurf nicht.
       p.end = Math.max(p.end, t.end);
-      if (n && n.speaker === p.speaker && !offAfter(p, n, n.start - p.ownEnd)) {
-        p.end = Math.max(p.end, n.end);
-        p.ownEnd = n.ownEnd;
-        p.spoken += n.spoken;
-        p.texts.push(...n.texts);
-        turns.splice(k, 1);
+      if (n && n.speaker === p.speaker) {
+        if (!offAfter(p, n, n.start - p.ownEnd)) {
+          p.end = Math.max(p.end, n.end);
+          p.ownEnd = n.ownEnd;
+          p.spoken += n.spoken;
+          p.texts.push(...n.texts);
+          turns.splice(k, 1);
+        } else {
+          p.end = p.ownEnd; // lange eigene Pause: der weggefallene Einwurf liegt im OFF
+        }
       }
       continue; // dieselbe Stelle erneut prüfen (mehrere Einwürfe hintereinander)
     }
