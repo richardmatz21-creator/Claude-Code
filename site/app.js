@@ -8,6 +8,8 @@ import { zipSync, strToU8 } from './__ASSETS__/vendor/fflate.js';
 
 // Ersetzt der Build durch die Versionskennung.
 const BUILD = '__BUILD__';
+// Analyse-Modus (…/?debug): Rohdaten der Umwandlung für die Auswertung der Textgerüst-Regeln
+const DEBUG = new URLSearchParams(location.search).has('debug');
 
 const $ = (id) => document.getElementById(id);
 const BIG_FILE = 500 * 1024 * 1024;
@@ -250,6 +252,8 @@ function onWorkerMessage(msg) {
       for (const seg of msg.segments) seg.orig = seg.text;
       f.result = { segments: msg.segments, removed: msg.removed, speakers: msg.speakers };
       f.levels = msg.levels ?? null; // Lautstärke je 100 ms, für die Pausen im Textgerüst
+      f.speech = msg.speech ?? null; // Sprach-Zeitleiste der Sprecher-Erkennung (robust bei Musik)
+      if (msg.debug) f.debug = msg.debug;
       f.elapsed = msg.seconds;
       f.names = [];
       f.unsaved = true;          // Text/Untertitel noch nicht heruntergeladen
@@ -387,6 +391,7 @@ async function processNext() {
     numSpeakers: s.diarize && s.speakers !== 'auto' ? Number(s.speakers) : null,
     mode: state.mode,
     run,
+    debug: DEBUG,
   }, [audio.buffer]);
 }
 
@@ -877,11 +882,13 @@ function blockName(f, speakers) {
 
 function generateScript(f, { keepSettings = false } = {}) {
   const prev = f.script;
-  const offGap = keepSettings && prev ? prev.offGap : 3;
+  const offGap = keepSettings && prev ? prev.offGap : 2;
   const level = keepSettings && prev ? prev.level : 2;
   const title = prev?.title ?? titleFromFileName(f.name);
   const freq = wordFrequencies(activeSegments(f.result.segments).map((s) => s.text));
-  const blocks = buildScriptBlocks(f.result.segments, { offGap, longTurn: LONG_TURN, duration: f.duration, levels: f.levels })
+  const blocks = buildScriptBlocks(f.result.segments, {
+    offGap, longTurn: LONG_TURN, duration: f.duration, levels: f.levels, speech: f.speech, language: f.settings.language,
+  })
     .map((b) => ({
       ...b,
       name: b.type === 'OT' ? blockName(f, b.speakers) : '',
@@ -1537,6 +1544,7 @@ async function init() {
   }
   bind();
   render();
+  if (DEBUG) window.__azt = state;
   state.mode = await detectMode();
   renderModeInfo();
   getWorker();

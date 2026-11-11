@@ -481,9 +481,11 @@ function cosine(a, b) {
  * @param weights Gewicht je Fingerabdruck (z. B. Dauer in Sekunden)
  * @param numSpeakers feste Anzahl oder null für automatisch
  * @param threshold Mindest-Ähnlichkeit zum Zusammenfassen (nur bei automatisch)
+ * @param minWeight Gruppen mit weniger Gewicht (Sekunden Sprache) sind unzuverlässig und kommen
+ *        zur ähnlichsten größeren Gruppe (nur bei automatisch; 0 = aus)
  * @returns Sprecher-Nummer je Fingerabdruck, nummeriert in Reihenfolge des ersten Auftretens
  */
-export function clusterSpeakers(embeddings, { weights = null, numSpeakers = null, threshold = 0.5 } = {}) {
+export function clusterSpeakers(embeddings, { weights = null, numSpeakers = null, threshold = 0.5, minWeight = 0 } = {}) {
   const n = embeddings.length;
   if (n === 0) return [];
   let clusters = embeddings.map((e, i) => {
@@ -507,6 +509,23 @@ export function clusterSpeakers(embeddings, { weights = null, numSpeakers = null
     for (let k = 0; k < sum.length; k++) sum[k] = a.sum[k] + b.sum[k];
     clusters = clusters.filter((_, k) => k !== bi && k !== bj);
     clusters.push({ sum, members: [...a.members, ...b.members] });
+  }
+  if (!numSpeakers && minWeight > 0) {
+    // Kurze Stimm-Schnipsel (oft Musik, Lachen oder ein einzelnes Wort) sind keine eigene Person.
+    const weightOf = (c) => c.members.reduce((s, m) => s + (weights ? weights[m] : 1), 0);
+    const big = clusters.filter((c) => weightOf(c) >= minWeight);
+    if (big.length) {
+      for (const c of clusters) {
+        if (big.includes(c)) continue;
+        let best = big[0], bestSim = -Infinity;
+        for (const b of big) {
+          const sim = cosine(c.sum, b.sum);
+          if (sim > bestSim) { bestSim = sim; best = b; }
+        }
+        best.members.push(...c.members); // Schwerpunkt bleibt der der großen Gruppe
+      }
+      clusters = big;
+    }
   }
   const label = new Array(n).fill(0);
   clusters.forEach((c, ci) => c.members.forEach((m) => { label[m] = ci; }));
@@ -559,21 +578,103 @@ function trimToSpeech(seg, levels, threshold, frameSec = 0.1) {
 const wordCount = (text) => text.split(/\s+/).filter(Boolean).length;
 
 /**
+ * Abschnitt auf die Sprach-Zeitleiste der Sprecher-Erkennung zuschneiden. Sie erkennt Stimmen auch
+ * unter Musik oder Geräuschen, wo die Lautstärke allein keine Pause zeigt.
+ * Whisper lässt einen Abschnitt oft schon am Ende des vorigen beginnen, auch wenn dazwischen Musik
+ * oder Stille liegt. Steckt im Abschnitt eine Pause von mindestens offGap Sekunden und reicht die
+ * Sprache danach für seine Wörter, beginnt er erst nach dieser Pause.
+ * @param regions [[start, end], …] nach Zeit sortiert
+ */
+function trimToRegions(seg, regions, offGap, secPerWord = 0.25) {
+  // Nur Bereiche, die wirklich im Abschnitt liegen (Grenzen von Whisper und Zeitleiste fallen oft zusammen)
+  const ov = regions.filter(([a, b]) => Math.min(b, seg.end) - Math.max(a, seg.start) > 0.1);
+  if (!ov.length) return seg;
+  let start = Math.max(seg.start, ov[0][0]);
+  const end = Math.min(seg.end, ov.at(-1)[1]);
+  const need = wordCount(seg.text) * secPerWord;
+  let after = 0;
+  for (let i = ov.length - 1; i > 0; i--) {
+    after += Math.min(ov[i][1], end) - Math.max(ov[i][0], seg.start);
+    if (ov[i][0] - ov[i - 1][1] >= offGap && after >= need) {
+      start = Math.max(start, ov[i][0]);
+      break;
+    }
+  }
+  return start < end ? { ...seg, start, end } : seg;
+}
+
+// Englische Wörter, die im Deutschen nicht vorkommen (für Liedtexte in der Musik).
+const EN_ONLY = new Set(`i you me my your the and but of to it it's i'm i'll i've you're it'll we they
+  she he him our this that with for don't can't never over when what know feel heart be is are always
+  get got`.split(/\s+/).filter(Boolean));
+const DE_ONLY = new Set(`ich du er wir ihr sie der die das den dem und aber nicht ist bin bist sind
+  ein eine einen einem mit von zu auf auch ja nein mal schon noch dass es wie wo mir mich dich uns
+  euch hat haben habe wird werden kann können muss müssen`.split(/\s+/).filter(Boolean));
+
+function languageScore(text) {
+  let en = 0, de = 0;
+  for (const raw of text.toLowerCase().replace(/[’`]/g, "'").split(/\s+/)) {
+    const w = raw.replace(/^[^\p{L}']+|[^\p{L}']+$/gu, '');
+    if (EN_ONLY.has(w)) en++;
+    else if (DE_ONLY.has(w)) de++;
+  }
+  return { en, de };
+}
+
+/**
+ * Findet englische Liedtexte in einer deutschen Aufnahme (Musik unter den Bildern): mindestens zwei
+ * Abschnitte hintereinander, die überwiegend Englisch sind. Ein einzelner englischer Satz (Zitat)
+ * bleibt. Ist die Aufnahme überwiegend Englisch, wird nichts entfernt.
+ * @returns Set der Indizes in segs, die als Musik gelten
+ */
+export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
+  const scores = segs.map((s) => languageScore(s.text));
+  const english = scores.map(({ en, de }) => en >= 2 && en > de);
+  const words = segs.reduce((n, s) => n + wordCount(s.text), 0);
+  const enWords = segs.reduce((n, s, i) => n + (english[i] ? wordCount(s.text) : 0), 0);
+  if (!words || enWords / words >= 0.5) return new Set();
+  // Nachbarn mit einzelnen englischen Wörtern gehören zum selben Lied (Whisper hört Liedzeilen oft halb deutsch)
+  const near = (i, j) => j >= 0 && j < segs.length && english[j]
+    && Math.max(segs[j].start - segs[i].end, segs[i].start - segs[j].end) < maxGap;
+  const lyric = english.map((e, i) => e || (scores[i].en >= 1 && (near(i, i - 1) || near(i, i + 1))));
+  const out = new Set();
+  for (let i = 0; i < segs.length;) {
+    if (!lyric[i]) { i++; continue; }
+    let j = i;
+    while (j + 1 < segs.length && lyric[j + 1] && segs[j + 1].start - segs[j].end < maxGap) j++;
+    if (j > i) for (let k = i; k <= j; k++) out.add(k);
+    i = j + 1;
+  }
+  return out;
+}
+
+/**
  * Teilt das Transkript in Blöcke eines Textgerüsts ein:
  *  - OFF: mindestens offGap Sekunden ohne Sprache (dort kommt der Sprechertext hin)
  *  - OT:  eine Person spricht länger am Stück (ab longTurn Sekunden) – oder allein
- *  - Sit: Hin und Her von zwei oder mehr Stimmen; ein kurzer Einwurf einer zweiten Stimme
- *         („Ja.“) nach einem kurzen Block macht daraus ein Sit. Nach einem langen OT fällt
- *         der Einwurf weg, das OT bleibt.
+ *  - Sit: Hin und Her von zwei oder mehr Stimmen. Dazu gehören auch eine kurze Frage mit ihrer
+ *         Antwort (in Interviews kommen keine Fragen vor) und ein Wechsel der Stimme ohne Pause
+ *         zwischen einem langen und einem kurzen Beitrag. Ein kurzer Einwurf („Ja.“) nach einem
+ *         langen OT fällt weg, das OT bleibt.
+ * Englische Liedtexte in einer deutschen Aufnahme zählen nicht als Sprache.
  * @param segments [{start, end, text, speaker}] – nur Abschnitte mit Text werden genutzt
- * @param levels Lautstärke je 100 ms (frameLevels); damit werden Pausen am Ton statt an Whisper gemessen
+ * @param speech Sprach-Zeitleiste der Sprecher-Erkennung [[start, end], …]; misst die Pausen auch unter Musik
+ * @param levels Lautstärke je 100 ms (frameLevels); Ersatz, wenn keine Sprach-Zeitleiste da ist
+ * @param language Sprache der Aufnahme ('de', 'auto', …); der Liedtext-Filter gilt nur für Deutsch
  * @returns [{ type: 'OFF'|'OT'|'Sit', speakers: number[], start, end, full }]
  */
-export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration = null, levels = null } = {}) {
+export function buildScriptBlocks(segments, {
+  offGap = 2, longTurn = 8, duration = null, levels = null, speech = null, language = 'de', directGap = 0.3,
+} = {}) {
   const threshold = levels?.length ? speechThreshold(levels) : 0;
-  const segs = activeSegments(segments)
-    .map((s) => (levels?.length ? trimToSpeech(s, levels, threshold) : s))
+  const regions = speech?.length ? [...speech].sort((a, b) => a[0] - b[0]) : null;
+  let segs = activeSegments(segments)
+    .map((s) => (regions ? trimToRegions(s, regions, offGap) : levels?.length ? trimToSpeech(s, levels, threshold) : s))
     .sort((a, b) => a.start - b.start);
+  if (language === 'de' || language === 'auto') {
+    const lyrics = findForeignLyrics(segs);
+    segs = segs.filter((_, i) => !lyrics.has(i));
+  }
   const total = Math.max(duration ?? 0, segs.at(-1)?.end ?? 0);
   const blocks = [];
   const off = (start, end) => blocks.push({ type: 'OFF', speakers: [], start, end, full: '' });
@@ -594,13 +695,15 @@ export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration
     return blocks;
   }
   const textOf = (t) => t.texts.join(' ');
+  const isLong = (t) => t.end - t.start >= longTurn;
   const isInterjection = (t) => t.end - t.start < 2 && wordCount(textOf(t)) <= 3;
+  const isQuestion = (t) => /\?["“”»«']?$/.test(t.texts.at(-1) ?? '');
 
   // Ein kurzer Einwurf einer anderen Stimme („Ja.“) direkt nach einem langen Beitrag fällt weg –
   // der lange Beitrag bleibt ein OT; spricht dieselbe Person danach weiter, wird es ein OT.
   for (let k = 1; k < turns.length;) {
     const t = turns[k], p = turns[k - 1];
-    if (isInterjection(t) && p.speaker !== t.speaker && p.end - p.start >= longTurn && t.start - p.end < offGap) {
+    if (isInterjection(t) && p.speaker !== t.speaker && isLong(p) && t.start - p.end < offGap) {
       turns.splice(k, 1);
       const n = turns[k];
       if (n && n.speaker === p.speaker && n.start - p.end < offGap) {
@@ -612,6 +715,15 @@ export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration
     }
     k++;
   }
+
+  // Gehören zwei aufeinanderfolgende Beiträge (ohne OFF dazwischen) zur selben Situation?
+  const together = (a, b) => {
+    if (a.speaker === b.speaker) return false;
+    if (!isLong(a) && !isLong(b)) return true;        // kurzes Hin und Her
+    if (isLong(a) && isLong(b)) return false;         // zwei lange Beiträge: je ein OT
+    if (!isLong(a) && isQuestion(a)) return true;     // kurze Frage und ihre Antwort
+    return b.start - a.end < directGap;               // Wechsel ohne Pause: Gespräch
+  };
 
   // 2. Beiträge ohne längere Pause bilden eine Strecke; zwischen Strecken liegt ein OFF
   const runs = [];
@@ -631,29 +743,15 @@ export function buildScriptBlocks(segments, { offGap = 3, longTurn = 8, duration
   if (runs[0][0].start >= offGap) off(0, runs[0][0].start);
   runs.forEach((run, ri) => {
     if (ri > 0) off(runs[ri - 1].at(-1).end, run[0].start);
-    const runStart = blocks.length;
-    // 3. Kurze Beiträge mehrerer Stimmen nacheinander = Sit; lange Beiträge = eigenes OT
-    let pending = [];
+    // 3. Zusammengehörige Beiträge bilden ein Sit, alle anderen sind ein eigenes OT
+    let group = [run[0]];
     const flush = () => {
-      if (pending.length >= 2 && new Set(pending.map((t) => t.speaker)).size >= 2) sit(pending);
-      else pending.forEach(ot);
-      pending = [];
+      if (group.length >= 2) sit(group);
+      else ot(group[0]);
     };
-    for (const t of run) {
-      const prev = blocks.length > runStart ? blocks.at(-1) : null;
-      if (!pending.length && prev && prev.type !== 'OFF' && isInterjection(t)
-        && (prev.type === 'Sit' || prev.end - prev.start < longTurn)) {
-        // Kurzer Einwurf („Ja.“) nach einem kurzen Block gehört dazu; zwei Stimmen = Sit
-        prev.full += ' ' + textOf(t);
-        prev.end = t.end;
-        if (!prev.speakers.includes(t.speaker)) prev.speakers.push(t.speaker);
-        if (prev.speakers.length >= 2) prev.type = 'Sit';
-      } else if (t.end - t.start >= longTurn) {
-        flush();
-        ot(t);
-      } else {
-        pending.push(t);
-      }
+    for (let k = 1; k < run.length; k++) {
+      if (together(run[k - 1], run[k])) group.push(run[k]);
+      else { flush(); group = [run[k]]; }
     }
     flush();
   });

@@ -228,7 +228,10 @@ async function diarize(ctx, { audio, segments, numSpeakers }) {
   const window = 10 * SAMPLE_RATE;
 
   // 1. In 10-Sekunden-Fenstern erkennen, wann jemand spricht (lokale Sprecher je Fenster).
+  //    Nebenbei entsteht eine Sprach-Zeitleiste, die auch bei Musik im Hintergrund stimmt
+  //    (das Textgerüst misst seine OFF-Pausen daran).
   const groups = new Map();
+  const speech = [];
   for (let a = 0; a < audio.length; a += window) {
     checkCancel();
     const b = Math.min(audio.length, a + window);
@@ -237,7 +240,8 @@ async function diarize(ctx, { audio, segments, numSpeakers }) {
     const { logits } = await segmentation.model(inputs);
     const result = segmentation.processor.post_process_speaker_diarization(logits, b - a)[0];
     for (const r of result) {
-      // 0 = niemand spricht, 1–3 = ein Sprecher, 4–6 = zwei gleichzeitig (überspringen)
+      // 0 = niemand spricht, 1–3 = ein Sprecher, 4–6 = zwei gleichzeitig (nur für die Zeitleiste)
+      if (r.id >= 1) speech.push([a / SAMPLE_RATE + r.start, a / SAMPLE_RATE + r.end]);
       if (r.id < 1 || r.id > 3) continue;
       const key = `${a}:${r.id}`;
       if (!groups.has(key)) groups.set(key, []);
@@ -265,14 +269,27 @@ async function diarize(ctx, { audio, segments, numSpeakers }) {
   }
 
   // 3. Gleiche Stimmen über die ganze Aufnahme zusammenfassen.
-  const labels = clusterSpeakers(embs, { weights, numSpeakers, threshold: 0.45 });
+  // Schwelle und Mindestgewicht an echtem Material abgestimmt (Außendreh mit Musik, viele Stimmen).
+  const labels = clusterSpeakers(embs, { weights, numSpeakers, threshold: 0.4, minWeight: 2 });
   const labelOf = new Map(keys.map((k, i) => [k, labels[i]]));
   const turns = [];
   for (const [key, regions] of groups) {
     if (!labelOf.has(key)) continue;
     for (const r of regions) turns.push({ ...r, speaker: labelOf.get(key) });
   }
-  if (turns.length === 0) return { segments: segments.map((s) => ({ ...s, speaker: 0 })), speakers: 1 };
+  // Sprach-Zeitleiste zusammenfassen (überlappende oder direkt anschließende Bereiche)
+  speech.sort((x, y) => x[0] - y[0]);
+  const speechMerged = [];
+  for (const [s0, e0] of speech) {
+    const last = speechMerged.at(-1);
+    if (last && s0 <= last[1] + 0.05) last[1] = Math.max(last[1], e0);
+    else speechMerged.push([s0, e0]);
+  }
+  const debug = ctx.debug ? {
+    keys, weights, embs: embs.map((e) => Array.from(e)),
+    groups: Object.fromEntries([...groups].map(([k, v]) => [k, v])),
+  } : undefined;
+  if (turns.length === 0) return { segments: segments.map((s) => ({ ...s, speaker: 0 })), speakers: 1, speech: speechMerged, debug };
 
   // 4. Jedem Textabschnitt den passenden Sprecher geben, neu nummerieren nach Auftreten.
   const assigned = assignSpeakers(segments, turns);
@@ -281,20 +298,22 @@ async function diarize(ctx, { audio, segments, numSpeakers }) {
   return {
     segments: assigned.map((s) => ({ ...s, speaker: order.get(s.speaker) })),
     speakers: Math.max(1, order.size),
+    speech: speechMerged,
+    debug,
   };
 }
 
 async function handleJob(job) {
   const t0 = performance.now();
   // Jede Nachricht trägt Datei-Nummer und Lauf-Kennung, damit die Seite alte Nachrichten erkennt.
-  const ctx = { post: (msg) => self.postMessage({ ...msg, id: job.id, run: job.run }) };
+  const ctx = { post: (msg) => self.postMessage({ ...msg, id: job.id, run: job.run }), debug: !!job.debug };
   cancelled = false;
   try {
     const { segments, removed, levels } = await transcribe(ctx, job);
     let result = { segments, removed, speakers: 0, levels };
     if (job.diarize && segments.length > 0) {
       const d = await diarize(ctx, { ...job, segments });
-      result = { ...result, segments: d.segments, speakers: d.speakers };
+      result = { ...result, segments: d.segments, speakers: d.speakers, speech: d.speech, debug: d.debug };
     }
     ctx.post({ type: 'result', ...result, seconds: (performance.now() - t0) / 1000 });
   } catch (err) {
