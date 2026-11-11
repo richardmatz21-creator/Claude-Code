@@ -601,7 +601,12 @@ const EPS = 1e-6;
  */
 function trimToRegions(seg, regions, offGap, prev = null, next = null) {
   const ov = regions.filter((r) => regionInSeg(r, seg));
-  if (!ov.length) return null;
+  if (!ov.length) {
+    // Ein kurzer Abschnitt, den Whisper etwas verschoben hat: Die Stimme ragt nur teilweise hinein.
+    const loose = regions.filter(([a, b]) => Math.min(b, seg.end) - Math.max(a, seg.start) > 0.1);
+    if (!loose.length) return null;
+    return { ...seg, start: Math.max(seg.start, loose[0][0]), end: Math.min(seg.end, loose.at(-1)[1]) };
+  }
   // Inseln: Sprachbereiche, zwischen denen keine OFF-lange Pause liegt
   const islands = [[ov[0]]];
   for (let i = 1; i < ov.length; i++) {
@@ -625,6 +630,17 @@ function trimToRegions(seg, regions, offGap, prev = null, next = null) {
   return start < end ? { ...seg, start, end } : seg;
 }
 
+// Sprachbereiche sortieren und überlappende zusammenfassen
+function mergeRegions(speech) {
+  const out = [];
+  for (const [a, b] of [...speech].sort((x, y) => x[0] - y[0])) {
+    const last = out.at(-1);
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+
 // Englische Wörter, die im Deutschen nicht vorkommen (für Liedtexte in der Musik).
 // „i“ und „is“ fehlen absichtlich: Im bairischen Dialekt heißen sie „ich“ und „ist“.
 const EN_ONLY = new Set(`you me my your the and but of to it it's i'm i'll i've you're it'll we they
@@ -646,8 +662,9 @@ function languageScore(text) {
 
 /**
  * Findet englische Liedtexte in einer deutschen Aufnahme (Musik unter den Bildern): mindestens zwei
- * Abschnitte hintereinander, die überwiegend Englisch sind. Ein einzelner englischer Satz (Zitat)
- * bleibt. Ist die Aufnahme überwiegend Englisch, wird nichts entfernt.
+ * Abschnitte hintereinander, die deutlich mehr englische als deutsche Wörter haben, dazu kurze
+ * Nachbarzeilen mit englischen Wörtern (Whisper hört Liedzeilen oft halb deutsch). Ein einzelner
+ * englischer Satz (Zitat) bleibt. Ist die Aufnahme überwiegend Englisch, wird nichts entfernt.
  * @returns Set der Indizes in segs, die als Musik gelten
  */
 export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
@@ -660,13 +677,18 @@ export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
   // Nachbarn mit einzelnen englischen Wörtern gehören zum selben Lied (Whisper hört Liedzeilen oft halb deutsch)
   const near = (i, j) => j >= 0 && j < segs.length && english[j]
     && Math.max(segs[j].start - segs[i].end, segs[i].start - segs[j].end) < maxGap;
-  const lyric = english.map((e, i) => e || (scores[i].en >= 1 && (near(i, i - 1) || near(i, i + 1))));
+  // (nur kurze Zeilen; ein langer deutscher Satz mit einem englischen Wort bleibt Sprache)
+  const lyric = english.map((e, i) => e || (scores[i].en >= 1 && wordCount(segs[i].text) <= 12
+    && (near(i, i - 1) || near(i, i + 1))));
   const out = new Set();
   for (let i = 0; i < segs.length;) {
     if (!lyric[i]) { i++; continue; }
     let j = i;
     while (j + 1 < segs.length && lyric[j + 1] && segs[j + 1].start - segs[j].end < maxGap) j++;
-    if (j > i) for (let k = i; k <= j; k++) out.add(k);
+    // Ein Lied hat mindestens zwei eindeutig englische Zeilen; ein einzelnes Zitat bleibt
+    let core = 0;
+    for (let k = i; k <= j; k++) if (english[k]) core++;
+    if (core >= 2) for (let k = i; k <= j; k++) out.add(k);
     i = j + 1;
   }
   return out;
@@ -695,7 +717,7 @@ export function buildScriptBlocks(segments, {
 } = {}) {
   const isPause = (gap) => gap >= offGap - EPS; // lang genug für ein OFF
   const threshold = levels?.length ? speechThreshold(levels) : 0;
-  const regions = speech?.length ? [...speech].sort((a, b) => a[0] - b[0]) : null;
+  const regions = speech?.length ? mergeRegions(speech) : null;
   const sorted = activeSegments(segments).sort((a, b) => a.start - b.start);
   const ignored = []; // Abschnitte, die nicht als Sprache zählen
   let segs = [];
@@ -713,6 +735,10 @@ export function buildScriptBlocks(segments, {
     ignored.push(...segs.filter((_, i) => lyrics.has(i)));
     segs = segs.filter((_, i) => !lyrics.has(i));
   }
+  // Pause zwischen zwei Beiträgen: zwischen den zugeschnittenen Abschnittsgrenzen. Bewusst nicht die
+  // längste Lücke der reinen Zeitleiste – sie füllt kurze Satzpausen mit Nachhall und Musik auf; der
+  // Vergleich mit einem echten Textgerüst passte mit den geschnittenen Grenzen deutlich besser.
+  const gap = (x, y) => y.start - x.end;
   const total = Math.max(duration ?? 0, segs.at(-1)?.end ?? 0);
   const blocks = [];
   const off = (start, end) => blocks.push({ type: 'OFF', speakers: [], start, end, full: '' });
@@ -721,7 +747,7 @@ export function buildScriptBlocks(segments, {
   const turns = [];
   for (const s of segs) {
     const last = turns.at(-1);
-    if (last && last.speaker === s.speaker && !isPause(s.start - last.end)) {
+    if (last && last.speaker === s.speaker && !isPause(gap(last, s))) {
       last.end = Math.max(last.end, s.end);
       last.texts.push(s.text.trim());
     } else {
@@ -743,10 +769,12 @@ export function buildScriptBlocks(segments, {
   // Eine kurze Frage („Und warum?“) ist kein Einwurf: Sie kommt mit ihrer Antwort in ein Sit.
   for (let k = 1; k < turns.length;) {
     const t = turns[k], p = turns[k - 1];
-    if (isInterjection(t) && !isQuestion(t) && p.speaker !== t.speaker && isLong(p) && !isPause(t.start - p.end)) {
+    if (isInterjection(t) && !isQuestion(t) && p.speaker !== t.speaker && isLong(p) && !isPause(gap(p, t))) {
       turns.splice(k, 1);
       const n = turns[k];
-      if (n && n.speaker === p.speaker && !isPause(n.start - t.end)) {
+      // Die Zeit des Einwurfs gehört zum OT (sonst entstünde dort ein falsches OFF)
+      p.end = Math.max(p.end, t.end);
+      if (n && n.speaker === p.speaker && !isPause(gap(p, n))) {
         p.end = Math.max(p.end, n.end);
         p.texts.push(...n.texts);
         turns.splice(k, 1);
@@ -762,14 +790,14 @@ export function buildScriptBlocks(segments, {
     if (!isLong(a) && !isLong(b)) return true;        // kurzes Hin und Her
     if (isLong(a) && isLong(b)) return false;         // zwei lange Beiträge: je ein OT
     if (!isLong(a) && isQuestion(a)) return true;     // kurze Frage und ihre Antwort
-    return b.start - a.end < directGap;               // Wechsel ohne Pause: Gespräch
+    return gap(a, b) < directGap;                     // Wechsel ohne Pause: Gespräch
   };
 
   // 2. Beiträge ohne längere Pause bilden eine Strecke; zwischen Strecken liegt ein OFF
   const runs = [];
   for (const t of turns) {
     const run = runs.at(-1);
-    if (run && !isPause(t.start - run.at(-1).end)) run.push(t);
+    if (run && !isPause(gap(run.at(-1), t))) run.push(t);
     else runs.push([t]);
   }
   const ot = (t) => blocks.push({ type: 'OT', speakers: [t.speaker], start: t.start, end: t.end, full: textOf(t) });

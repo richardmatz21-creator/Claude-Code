@@ -950,7 +950,7 @@ function renderScript(f) {
       <label class="visually-hidden" for="sb-text-${i}">Text von Block ${i + 1}</label>
       <textarea id="sb-text-${i}" data-field="text" rows="2" spellcheck="true" lang="${textLang(f)}"
         placeholder="${b.type === 'OFF' ? 'Sprechertext (optional)' : 'Text'}">${esc(b.text)}</textarea>
-      ${b.ignored ? `<p class="small sblock-ignored">Nicht als Sprache gezählt (Liedtext oder keine Stimme erkannt): „${esc(b.ignored)}“${b.type === 'OFF' ? ' – falls das doch gesprochen ist: Block auf OT oder Sit stellen.' : ''}</p>` : ''}
+      ${b.ignored ? `<p class="small sblock-ignored">Nicht als Sprache gezählt (Liedtext oder keine Stimme erkannt): „${esc(b.ignored)}“${b.type === 'OFF' && !b.full ? ' – falls das doch gesprochen ist: Block auf OT oder Sit stellen.' : ''}</p>` : ''}
     </article>`).join('');
   for (const ta of $('script-blocks').querySelectorAll('textarea')) autoSize(ta);
 }
