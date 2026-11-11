@@ -339,6 +339,45 @@ test('Textgerüst: spricht dieselbe Person weiter, gibt es erst ab 8 s Pause ein
   // Einstellbar; eine größere OFF-Länge gilt auch für dieselbe Person
   assert.deepEqual(buildScriptBlocks([erst, dann(15)], { duration: 21, offGapSame: 4 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
   assert.deepEqual(buildScriptBlocks([erst, dann(18.5)], { duration: 24.5, offGap: 10 }).map((b) => b.type), ['OT']);
+  // Grenze genau bei 8 s
+  assert.deepEqual(buildScriptBlocks([erst, dann(17.9)], { duration: 23.9 }).map((b) => b.type), ['OT']);
+  assert.deepEqual(buildScriptBlocks([erst, dann(18)], { duration: 24 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  // Nach einem weggefallenen Einwurf gilt dieselbe Regel
+  const lang = { start: 0, end: 12, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 };
+  const ja = { start: 12.2, end: 12.7, text: 'Ja.', speaker: 1 };
+  assert.deepEqual(buildScriptBlocks([lang, ja, dann(17.7)], { duration: 23.7 }).map((b) => b.type), ['OT']);
+  assert.deepEqual(buildScriptBlocks([lang, ja, dann(21.2)], { duration: 27.2 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  // Zwei Einwürfe derselben Stimme mit Pause dazwischen bleiben Einwürfe
+  const genau = { start: 15.7, end: 16.2, text: 'Genau.', speaker: 1 };
+  assert.deepEqual(buildScriptBlocks([lang, ja, genau, { ...dann(16.4), end: 28 }], { duration: 28 }).map((b) => b.type), ['OT']);
+  // Zuschneiden auf die Zeitleiste macht bei derselben Person kein OFF aus 4 s Pause
+  const zeit = buildScriptBlocks([
+    { start: 0, end: 15, text: 'Die Ziegen sind heute schon draußen.', speaker: 0 },
+    { start: 15, end: 20, text: 'Gleich holen wir sie wieder rein.', speaker: 0 },
+  ], { duration: 20, speech: [[0, 6], [10, 20]] });
+  assert.deepEqual(zeit.map((b) => b.type), ['OT']);
+  // Ohne Sprecher-Erkennung gilt die gewählte OFF-Länge überall
+  const ohne = [
+    { start: 0, end: 9, text: 'Am Morgen fahren wir mit dem Traktor raus.', },
+    { start: 12, end: 20, text: 'Dann wird das Heu gewendet.', },
+  ];
+  assert.deepEqual(buildScriptBlocks(ohne, { duration: 20 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  assert.deepEqual(buildScriptBlocks(ohne, { duration: 20, offGap: 5 }).map((b) => b.type), ['OT']);
+});
+
+test('Textgerüst: lang oder kurz zählt nach gesprochener Zeit, nicht nach Pausen dazwischen', () => {
+  // A spricht nur 3 s (mit 5 s Pause dazwischen), B antwortet kurz → kurzes Hin und Her = Sit
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 1.5, text: 'Schau mal da drüben.', speaker: 0 },
+    { start: 6.5, end: 8, text: 'Da steht ein Reh.', speaker: 0 },
+    { start: 8.3, end: 8.8, text: 'Oh ja!', speaker: 1 },
+  ], { duration: 8.8 }).map((b) => b.type), ['Sit']);
+  // A spricht 4 s, B antwortet ohne Pause lang → Wechsel ohne Pause = Sit
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 2, text: 'Kommst du heute mit?', speaker: 0 },
+    { start: 7, end: 9, text: 'Wir fahren zum See.', speaker: 0 },
+    { start: 9.1, end: 20, text: 'Ja, gern, ich packe nur noch schnell die Badesachen und etwas zu essen ein.', speaker: 1 },
+  ], { duration: 20 }).map((b) => b.type), ['Sit']);
 });
 
 test('Textgerüst: OFF ab 2 Sekunden (Standard), kürzere Pausen bleiben im Block', () => {

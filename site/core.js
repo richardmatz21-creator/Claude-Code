@@ -597,9 +597,10 @@ const EPS = 1e-6;
  * Rand, die ohne Pause in den Nachbar-Abschnitt weiterläuft, zum Nachbarn.
  * @param regions [[start, end], …] nach Zeit sortiert
  * @param prev, next benachbarte Abschnitte (ungeschnitten) oder null
+ * @param islandGap Pause, ab der Sprachbereiche getrennte Inseln sind (bei derselben Person länger)
  * @returns geschnittener Abschnitt, oder null, wenn darin keine Stimme erkannt wurde
  */
-function trimToRegions(seg, regions, offGap, prev = null, next = null) {
+function trimToRegions(seg, regions, offGap, prev = null, next = null, islandGap = offGap) {
   const ov = regions.filter((r) => regionInSeg(r, seg));
   if (!ov.length) {
     // Ein kurzer Abschnitt, den Whisper etwas verschoben hat: Die Stimme ragt nur teilweise hinein.
@@ -610,7 +611,7 @@ function trimToRegions(seg, regions, offGap, prev = null, next = null) {
   // Inseln: Sprachbereiche, zwischen denen keine OFF-lange Pause liegt
   const islands = [[ov[0]]];
   for (let i = 1; i < ov.length; i++) {
-    if (ov[i][0] - ov[i - 1][1] >= offGap - EPS) islands.push([ov[i]]);
+    if (ov[i][0] - ov[i - 1][1] >= islandGap - EPS) islands.push([ov[i]]);
     else islands.at(-1).push(ov[i]);
   }
   // Nur bei einer langen Pause im Abschnitt: Sprache am Rand, die auch im Nachbarn liegt, gehört ihm.
@@ -697,8 +698,9 @@ export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
 /**
  * Teilt das Transkript in Blöcke eines Textgerüsts ein:
  *  - OFF: mindestens offGap Sekunden ohne Sprache beim Wechsel der Stimme, bei derselben Person erst
- *         ab offGapSame Sekunden (mindestens 8 s) – eine Person, die kurz absetzt, bleibt ein Block
- *         (dort kommt der Sprechertext hin)
+ *         ab max(offGap, offGapSame) Sekunden – eine Person, die kurz absetzt, bleibt ein Block
+ *         (dort kommt der Sprechertext hin). Ohne Sprecher-Erkennung gilt überall offGap.
+ *  - lang/kurz: gemessen an der gesprochenen Zeit eines Beitrags, ohne seine Pausen
  *  - OT:  eine Person spricht länger am Stück (ab longTurn Sekunden) – oder allein
  *  - Sit: Hin und Her von zwei oder mehr Stimmen. Dazu gehören auch eine kurze Frage mit ihrer
  *         Antwort (in Interviews kommen keine Fragen vor) und ein Wechsel der Stimme ohne Pause
@@ -711,6 +713,8 @@ export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
  * @param segments [{start, end, text, speaker}] – nur Abschnitte mit Text werden genutzt
  * @param speech Sprach-Zeitleiste der Sprecher-Erkennung [[start, end], …]; misst die Pausen auch unter Musik
  * @param levels Lautstärke je 100 ms (frameLevels); Ersatz, wenn keine Sprach-Zeitleiste da ist
+ * @param offGap OFF-Länge beim Wechsel der Stimme (Auswahlfeld)
+ * @param offGapSame OFF-Länge, wenn dieselbe Person weiterspricht (gilt nur, wenn größer als offGap)
  * @param language Sprache der Einstellung ('de', 'auto', …); der Liedtext-Filter gilt nur bei 'de'
  * @returns [{ type: 'OFF'|'OT'|'Sit', speakers: number[], start, end, full, ignored? }]
  */
@@ -721,6 +725,10 @@ export function buildScriptBlocks(segments, {
   // Bei derselben Person braucht ein OFF eine längere Pause (Vergleich mit echten Textgerüsten)
   const sameGap = Math.max(offGap, offGapSame);
   const isSamePause = (gap) => gap >= sameGap - EPS;
+  // Ohne Sprecher-Erkennung ist unbekannt, ob dieselbe Person weiterspricht: dann gilt offGap
+  const known = (x) => x.speaker !== undefined && x.speaker !== null;
+  const samePerson = (a, b) => known(a) && a.speaker === b.speaker;
+  const offAfter = (a, b, g) => (samePerson(a, b) ? isSamePause(g) : isPause(g));
   const threshold = levels?.length ? speechThreshold(levels) : 0;
   const regions = speech?.length ? mergeRegions(speech) : null;
   const sorted = activeSegments(segments).sort((a, b) => a.start - b.start);
@@ -729,7 +737,9 @@ export function buildScriptBlocks(segments, {
   sorted.forEach((s, i) => {
     if (!regions) segs.push(levels?.length ? trimToSpeech(s, levels, threshold) : s);
     else {
-      const t = trimToRegions(s, regions, offGap, sorted[i - 1] ?? null, sorted[i + 1] ?? null);
+      const pv = sorted[i - 1] ?? null, nx = sorted[i + 1] ?? null;
+      const alone = (!pv || samePerson(pv, s)) && (!nx || samePerson(nx, s));
+      const t = trimToRegions(s, regions, offGap, pv, nx, alone ? sameGap : offGap);
       if (t) segs.push(t);
       else ignored.push(s); // keine Stimme erkannt (z. B. von Whisper erfunden unter Musik)
     }
@@ -752,11 +762,12 @@ export function buildScriptBlocks(segments, {
   const turns = [];
   for (const s of segs) {
     const last = turns.at(-1);
-    if (last && last.speaker === s.speaker && !isSamePause(gap(last, s))) {
+    if (last && last.speaker === s.speaker && !offAfter(last, s, gap(last, s))) {
       last.end = Math.max(last.end, s.end);
+      last.spoken += s.end - s.start;
       last.texts.push(s.text.trim());
     } else {
-      turns.push({ speaker: s.speaker, start: s.start, end: s.end, texts: [s.text.trim()] });
+      turns.push({ speaker: s.speaker, start: s.start, end: s.end, spoken: s.end - s.start, texts: [s.text.trim()] });
     }
   }
   if (!turns.length) {
@@ -765,8 +776,9 @@ export function buildScriptBlocks(segments, {
     return blocks;
   }
   const textOf = (t) => t.texts.join(' ');
-  const isLong = (t) => t.end - t.start >= longTurn;
-  const isInterjection = (t) => t.end - t.start < 2 && wordCount(textOf(t)) <= 3;
+  // Lang/kurz an der gesprochenen Zeit (Pausen bis zur OFF-Länge zählen nicht mit)
+  const isLong = (t) => t.spoken >= longTurn;
+  const isInterjection = (t) => t.spoken < 2 && wordCount(textOf(t)) <= 3;
   const isQuestion = (t) => /\?["“”»«']?$/.test(t.texts.at(-1) ?? '');
 
   // Ein kurzer Einwurf einer anderen Stimme („Ja.“) direkt nach einem langen Beitrag fällt weg –
@@ -779,8 +791,9 @@ export function buildScriptBlocks(segments, {
       const n = turns[k];
       // Die Zeit des Einwurfs gehört zum OT (sonst entstünde dort ein falsches OFF)
       p.end = Math.max(p.end, t.end);
-      if (n && n.speaker === p.speaker && !isSamePause(gap(p, n))) {
+      if (n && n.speaker === p.speaker && !offAfter(p, n, gap(p, n))) {
         p.end = Math.max(p.end, n.end);
+        p.spoken += n.spoken;
         p.texts.push(...n.texts);
         turns.splice(k, 1);
       }
