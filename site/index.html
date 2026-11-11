@@ -243,14 +243,15 @@
             <input id="script-title" type="text" autocomplete="off">
           </div>
           <div class="field">
-            <label for="script-off">OFF ab … ohne Sprache</label>
-            <select id="script-off">
+            <label for="script-off">OFF ab … Pause</label>
+            <select id="script-off" aria-describedby="script-off-hint">
               <option value="1.5">1,5 Sekunden</option>
               <option value="2">2 Sekunden</option>
               <option value="3">3 Sekunden</option>
               <option value="5">5 Sekunden</option>
               <option value="8">8 Sekunden</option>
             </select>
+            <p class="small field-hint" id="script-off-hint">beim Wechsel der Stimme; spricht dieselbe Person weiter, erst ab 8 Sekunden</p>
           </div>
           <div class="field">
             <label for="script-level">Kürzung: <span id="script-level-text"></span></label>

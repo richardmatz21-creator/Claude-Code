@@ -696,7 +696,9 @@ export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
 
 /**
  * Teilt das Transkript in Blöcke eines Textgerüsts ein:
- *  - OFF: mindestens offGap Sekunden ohne Sprache (dort kommt der Sprechertext hin)
+ *  - OFF: mindestens offGap Sekunden ohne Sprache beim Wechsel der Stimme, bei derselben Person erst
+ *         ab offGapSame Sekunden (mindestens 8 s) – eine Person, die kurz absetzt, bleibt ein Block
+ *         (dort kommt der Sprechertext hin)
  *  - OT:  eine Person spricht länger am Stück (ab longTurn Sekunden) – oder allein
  *  - Sit: Hin und Her von zwei oder mehr Stimmen. Dazu gehören auch eine kurze Frage mit ihrer
  *         Antwort (in Interviews kommen keine Fragen vor) und ein Wechsel der Stimme ohne Pause
@@ -713,9 +715,12 @@ export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
  * @returns [{ type: 'OFF'|'OT'|'Sit', speakers: number[], start, end, full, ignored? }]
  */
 export function buildScriptBlocks(segments, {
-  offGap = 2, longTurn = 8, duration = null, levels = null, speech = null, language = 'de', directGap = 0.3,
+  offGap = 2, offGapSame = 8, longTurn = 8, duration = null, levels = null, speech = null, language = 'de', directGap = 0.3,
 } = {}) {
   const isPause = (gap) => gap >= offGap - EPS; // lang genug für ein OFF
+  // Bei derselben Person braucht ein OFF eine längere Pause (Vergleich mit echten Textgerüsten)
+  const sameGap = Math.max(offGap, offGapSame);
+  const isSamePause = (gap) => gap >= sameGap - EPS;
   const threshold = levels?.length ? speechThreshold(levels) : 0;
   const regions = speech?.length ? mergeRegions(speech) : null;
   const sorted = activeSegments(segments).sort((a, b) => a.start - b.start);
@@ -747,7 +752,7 @@ export function buildScriptBlocks(segments, {
   const turns = [];
   for (const s of segs) {
     const last = turns.at(-1);
-    if (last && last.speaker === s.speaker && !isPause(gap(last, s))) {
+    if (last && last.speaker === s.speaker && !isSamePause(gap(last, s))) {
       last.end = Math.max(last.end, s.end);
       last.texts.push(s.text.trim());
     } else {
@@ -774,7 +779,7 @@ export function buildScriptBlocks(segments, {
       const n = turns[k];
       // Die Zeit des Einwurfs gehört zum OT (sonst entstünde dort ein falsches OFF)
       p.end = Math.max(p.end, t.end);
-      if (n && n.speaker === p.speaker && !isPause(gap(p, n))) {
+      if (n && n.speaker === p.speaker && !isSamePause(gap(p, n))) {
         p.end = Math.max(p.end, n.end);
         p.texts.push(...n.texts);
         turns.splice(k, 1);
