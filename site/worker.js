@@ -235,10 +235,16 @@ async function diarize(ctx, { audio, segments, numSpeakers }) {
   for (let a = 0; a < audio.length; a += window) {
     checkCancel();
     const b = Math.min(audio.length, a + window);
-    if (b - a < SAMPLE_RATE) break;
-    const inputs = await segmentation.processor(audio.subarray(a, b));
+    // Ein sehr kurzes letztes Stück auf 1 s auffüllen (Stille), damit auch das Ende in der Zeitleiste steht
+    let piece = audio.subarray(a, b);
+    if (piece.length < SAMPLE_RATE) {
+      const padded = new Float32Array(SAMPLE_RATE);
+      padded.set(piece);
+      piece = padded;
+    }
+    const inputs = await segmentation.processor(piece);
     const { logits } = await segmentation.model(inputs);
-    const result = segmentation.processor.post_process_speaker_diarization(logits, b - a)[0];
+    const result = segmentation.processor.post_process_speaker_diarization(logits, piece.length)[0];
     for (const r of result) {
       // 0 = niemand spricht, 1–3 = ein Sprecher, 4–6 = zwei gleichzeitig (nur für die Zeitleiste)
       if (r.id >= 1) speech.push([a / SAMPLE_RATE + r.start, a / SAMPLE_RATE + r.end]);

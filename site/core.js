@@ -578,11 +578,15 @@ function trimToSpeech(seg, levels, threshold, frameSec = 0.1) {
 const wordCount = (text) => text.split(/\s+/).filter(Boolean).length;
 
 // Liegt ein Sprachbereich wirklich im Abschnitt? Whisper-Grenzen liegen oft 0,2–0,5 s daneben:
-// Ein Bereich, der nur knapp hineinragt, gehört zum Nachbarn.
+// Ein Bereich, der nur knapp in einen längeren Abschnitt ragt, gehört zum Nachbarn. Ein sehr kurzer
+// Abschnitt („Nein.“) mitten in durchgehender Sprache zählt, wenn der Bereich ihn zur Hälfte abdeckt.
 function regionInSeg([a, b], seg) {
   const o = Math.min(b, seg.end) - Math.max(a, seg.start);
-  return o > 0.1 && (o >= 0.5 || o >= 0.5 * (b - a));
+  return o > 0.1 && (o >= 0.5 || o >= 0.5 * (b - a) || o >= 0.5 * (seg.end - seg.start));
 }
+
+// Kleine Toleranz für Pausenvergleiche (4,6 − 3,1 ergibt in Fließkomma 1,4999…)
+const EPS = 1e-6;
 
 /**
  * Abschnitt auf die Sprach-Zeitleiste der Sprecher-Erkennung zuschneiden. Sie erkennt Stimmen auch
@@ -601,14 +605,23 @@ function trimToRegions(seg, regions, offGap, prev = null, next = null) {
   // Inseln: Sprachbereiche, zwischen denen keine OFF-lange Pause liegt
   const islands = [[ov[0]]];
   for (let i = 1; i < ov.length; i++) {
-    if (ov[i][0] - ov[i - 1][1] >= offGap) islands.push([ov[i]]);
+    if (ov[i][0] - ov[i - 1][1] >= offGap - EPS) islands.push([ov[i]]);
     else islands.at(-1).push(ov[i]);
   }
-  let first = 0, last = islands.length - 1;
-  if (last > first && prev && regionInSeg(islands[first][0], prev)) first++;
-  if (last > first && next && regionInSeg(islands[last].at(-1), next)) last--;
-  const start = Math.max(seg.start, islands[first][0][0]);
-  const end = Math.min(seg.end, islands[last].at(-1)[1]);
+  // Nur bei einer langen Pause im Abschnitt: Sprache am Rand, die auch im Nachbarn liegt, gehört ihm.
+  // Die Insel mit der meisten Sprache trägt den Text des Abschnitts und bleibt ganz.
+  let lo = 0, hi = ov.length - 1;
+  if (islands.length > 1) {
+    const inSeg = (isl) => isl.reduce((n, [a, b]) => n + Math.max(0, Math.min(b, seg.end) - Math.max(a, seg.start)), 0);
+    const sizes = islands.map(inSeg);
+    const main = sizes.indexOf(Math.max(...sizes));
+    const firstEnd = islands[0].length;                  // Bereiche der ersten Insel: 0 … firstEnd-1
+    const lastStart = ov.length - islands.at(-1).length; // Bereiche der letzten Insel: lastStart …
+    if (main !== 0) while (lo < firstEnd && prev && regionInSeg(ov[lo], prev)) lo++;
+    if (main !== islands.length - 1) while (hi >= lastStart && hi > lo && next && regionInSeg(ov[hi], next)) hi--;
+  }
+  const start = Math.max(seg.start, ov[lo][0]);
+  const end = Math.min(seg.end, ov[hi][1]);
   return start < end ? { ...seg, start, end } : seg;
 }
 
@@ -639,7 +652,8 @@ function languageScore(text) {
  */
 export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
   const scores = segs.map((s) => languageScore(s.text));
-  const english = scores.map(({ en, de }) => en >= 2 && en > de);
+  // Deutlich mehr englische als deutsche Wörter (ein Liedtitel im deutschen Satz reicht nicht)
+  const english = scores.map(({ en, de }) => en >= 2 && en > 2 * de);
   const words = segs.reduce((n, s) => n + wordCount(s.text), 0);
   const enWords = segs.reduce((n, s, i) => n + (english[i] ? wordCount(s.text) : 0), 0);
   if (!words || enWords / words >= 0.5) return new Set();
@@ -679,6 +693,7 @@ export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
 export function buildScriptBlocks(segments, {
   offGap = 2, longTurn = 8, duration = null, levels = null, speech = null, language = 'de', directGap = 0.3,
 } = {}) {
+  const isPause = (gap) => gap >= offGap - EPS; // lang genug für ein OFF
   const threshold = levels?.length ? speechThreshold(levels) : 0;
   const regions = speech?.length ? [...speech].sort((a, b) => a[0] - b[0]) : null;
   const sorted = activeSegments(segments).sort((a, b) => a.start - b.start);
@@ -706,7 +721,7 @@ export function buildScriptBlocks(segments, {
   const turns = [];
   for (const s of segs) {
     const last = turns.at(-1);
-    if (last && last.speaker === s.speaker && s.start - last.end < offGap) {
+    if (last && last.speaker === s.speaker && !isPause(s.start - last.end)) {
       last.end = Math.max(last.end, s.end);
       last.texts.push(s.text.trim());
     } else {
@@ -714,7 +729,7 @@ export function buildScriptBlocks(segments, {
     }
   }
   if (!turns.length) {
-    if (total >= offGap || ignored.length) off(0, total);
+    if (isPause(total) || ignored.length) off(0, total);
     attachIgnored(blocks, ignored);
     return blocks;
   }
@@ -725,12 +740,13 @@ export function buildScriptBlocks(segments, {
 
   // Ein kurzer Einwurf einer anderen Stimme („Ja.“) direkt nach einem langen Beitrag fällt weg –
   // der lange Beitrag bleibt ein OT; spricht dieselbe Person danach weiter, wird es ein OT.
+  // Eine kurze Frage („Und warum?“) ist kein Einwurf: Sie kommt mit ihrer Antwort in ein Sit.
   for (let k = 1; k < turns.length;) {
     const t = turns[k], p = turns[k - 1];
-    if (isInterjection(t) && p.speaker !== t.speaker && isLong(p) && t.start - p.end < offGap) {
+    if (isInterjection(t) && !isQuestion(t) && p.speaker !== t.speaker && isLong(p) && !isPause(t.start - p.end)) {
       turns.splice(k, 1);
       const n = turns[k];
-      if (n && n.speaker === p.speaker && n.start - p.end < offGap) {
+      if (n && n.speaker === p.speaker && !isPause(n.start - t.end)) {
         p.end = Math.max(p.end, n.end);
         p.texts.push(...n.texts);
         turns.splice(k, 1);
@@ -753,7 +769,7 @@ export function buildScriptBlocks(segments, {
   const runs = [];
   for (const t of turns) {
     const run = runs.at(-1);
-    if (run && t.start - run.at(-1).end < offGap) run.push(t);
+    if (run && !isPause(t.start - run.at(-1).end)) run.push(t);
     else runs.push([t]);
   }
   const ot = (t) => blocks.push({ type: 'OT', speakers: [t.speaker], start: t.start, end: t.end, full: textOf(t) });
@@ -764,7 +780,7 @@ export function buildScriptBlocks(segments, {
     end: ts.at(-1).end,
     full: ts.map(textOf).join(' '),
   });
-  if (runs[0][0].start >= offGap) off(0, runs[0][0].start);
+  if (isPause(runs[0][0].start)) off(0, runs[0][0].start);
   runs.forEach((run, ri) => {
     if (ri > 0) off(runs[ri - 1].at(-1).end, run[0].start);
     // 3. Zusammengehörige Beiträge bilden ein Sit, alle anderen sind ein eigenes OT.
@@ -788,7 +804,7 @@ export function buildScriptBlocks(segments, {
     flush();
   });
   const lastEnd = runs.at(-1).at(-1).end;
-  if (total - lastEnd >= offGap) off(lastEnd, total);
+  if (isPause(total - lastEnd)) off(lastEnd, total);
   attachIgnored(blocks, ignored);
   return blocks;
 }
