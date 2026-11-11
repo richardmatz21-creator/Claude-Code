@@ -34,7 +34,7 @@ const shortOpts = (f) => {
   const { ratio, groupSize, maxGroups } = SCRIPT_LEVELS[f.script.level];
   return { ratio, groupSize, maxGroups, freq: f.script.freq };
 };
-const LONG_TURN = 8; // ab so vielen Sekunden am Stück ist ein Beitrag ein eigenes OT
+const LONG_TURN = 8; // ab so vielen Sekunden Sprache ist ein Beitrag ein eigenes OT
 
 // ---------- Zustand ----------
 

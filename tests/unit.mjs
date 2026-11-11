@@ -382,6 +382,17 @@ test('Textgerüst: spricht dieselbe Person weiter, gibt es erst ab 8 s Pause ein
     { start: 3, end: 7.5, text: 'Dafür brauchen wir Mehl und Wasser.', speaker: 0 },
     { start: 7.6, end: 8, text: 'Mhm.', speaker: 1 },
   ], { duration: 8 }).map((b) => b.type), ['Sit']);
+  // Eine Frage mit „Mhm.“ derselben Stimme danach ist kein Einwurf und geht nicht verloren
+  const echt = buildScriptBlocks([lang, { start: 12.2, end: 12.8, text: 'Echt?', speaker: 1 },
+    { start: 17.8, end: 18.1, text: 'Mhm.', speaker: 1 }, { ...dann(18.5), end: 28 }], { duration: 28 });
+  assert.ok(echt.some((b) => /Echt\?/.test(b.full)), JSON.stringify(echt.map((b) => [b.type, b.full])));
+  // Nach einem weggefallenen Einwurf zählt die eigene Pause der Person: 11,7 s → OFF
+  const eigenePause = buildScriptBlocks([
+    { start: 0, end: 10, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 },
+    { start: 11.9, end: 13.8, text: 'Ja, genau.', speaker: 1 },
+    { start: 21.7, end: 30, text: 'Jetzt kommt die Milch in den großen Kessel.', speaker: 0 },
+  ], { duration: 30 });
+  assert.deepEqual(eigenePause.map((b) => [b.type, b.start]), [['OT', 0], ['OFF', 13.8], ['OT', 21.7]]);
   // Ein Einwurf erst nach 3 s Pause ist kein Einwurf mehr, sondern ein eigener Block
   assert.deepEqual(buildScriptBlocks([lang, { ...ja, start: 15, end: 15.5 }], { duration: 15.5 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
   // Ohne Sprecher-Erkennung gilt die gewählte OFF-Länge überall
@@ -596,6 +607,14 @@ test('Textgerüst: englischer Liedtext in der Musik zählt nicht als Sprache', (
   assert.match(blocks[1].ignored, /^Komm mit mir.*my name$/); // weggelassen, aber sichtbar
   // Nur bei eingestelltem Deutsch: bei „automatisch“ kann die Aufnahme jede Sprache haben
   assert.ok(buildScriptBlocks(segs, { duration: 32, language: 'auto' }).some((b) => /river/.test(b.full)));
+  // Liedtext, den die Sprecher-Erkennung der nächsten Person zuordnet, verhindert das OFF nicht
+  const zugeordnet = buildScriptBlocks([
+    { start: 0, end: 9.9, text: 'Am Nachmittag haben wir die ganzen Kartoffeln auf dem Acker geerntet.', speaker: 1 },
+    { start: 10, end: 10.8, text: 'You and me forever', speaker: 0 },
+    { start: 10.8, end: 11.5, text: 'Never let me go', speaker: 0 },
+    { start: 11.5, end: 25, text: 'Danach haben wir alle zusammen im Hof gesessen und noch lange über den Tag geredet.', speaker: 0 },
+  ], { duration: 25, speech: [[0, 9.9], [10, 12], [15, 25]] });
+  assert.deepEqual(zugeordnet.map((b) => b.type), ['OT', 'OFF', 'OT']);
   // Bei englischer Aufnahme bleibt alles
   assert.ok(buildScriptBlocks(segs, { duration: 32, language: 'en' }).some((b) => /river/.test(b.full)));
   // Ein einzelner englischer Satz (Zitat) bleibt

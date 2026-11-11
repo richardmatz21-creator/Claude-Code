@@ -707,7 +707,7 @@ export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
  *         ab max(offGap, offGapSame) Sekunden – eine Person, die kurz absetzt, bleibt ein Block
  *         (dort kommt der Sprechertext hin). Ohne Sprecher-Erkennung gilt überall offGap.
  *  - lang/kurz: gemessen an der Länge seiner Abschnitte; Pausen zwischen den Abschnitten zählen nicht
- *  - OT:  eine Person spricht länger am Stück (ab longTurn Sekunden) – oder allein
+ *  - OT:  eine Person spricht länger (ab longTurn Sekunden Sprache) – oder allein
  *  - Sit: Hin und Her von zwei oder mehr Stimmen. Dazu gehören auch eine kurze Frage mit ihrer
  *         Antwort (in Interviews kommen keine Fragen vor) und ein Wechsel der Stimme ohne Pause
  *         zwischen einem langen und einem kurzen Beitrag. Ein kurzer Einwurf („Ja.“) nach einem
@@ -740,23 +740,20 @@ export function buildScriptBlocks(segments, {
   // Fehlende Sprecher-Angabe einheitlich als null (undefined und null sind dieselbe „unbekannte“ Stimme)
   const sorted = activeSegments(segments).map((s) => ({ ...s, speaker: s.speaker ?? null })).sort((a, b) => a.start - b.start);
   const ignored = []; // Abschnitte, die nicht als Sprache zählen
+  // Englische Liedtexte zuerst erkennen: Sie sind Musik, auch wenn die Sprecher-Erkennung ihnen
+  // eine Stimme zuordnet, und gelten beim Zuschneiden der Nachbarn nicht als dieselbe Person.
+  const lyricIdx = language === 'de' ? findForeignLyrics(sorted) : new Set();
   let segs = [];
   sorted.forEach((s, i) => {
-    if (!regions) segs.push(levels?.length ? trimToSpeech(s, levels, threshold) : s);
-    else {
-      const pv = sorted[i - 1] ?? null, nx = sorted[i + 1] ?? null;
-      const gapTo = (nb) => (nb && samePerson(nb, s) ? sameGap : offGap);
-      const t = trimToRegions(s, regions, pv, nx, gapTo(pv), gapTo(nx));
-      if (t) segs.push(t);
-      else ignored.push(s); // keine Stimme erkannt (z. B. von Whisper erfunden unter Musik)
-    }
+    if (lyricIdx.has(i)) { ignored.push(s); return; }
+    if (!regions) { segs.push(levels?.length ? trimToSpeech(s, levels, threshold) : s); return; }
+    const pv = sorted[i - 1] ?? null, nx = sorted[i + 1] ?? null;
+    const gapTo = (nb, j) => (nb && !lyricIdx.has(j) && samePerson(nb, s) ? sameGap : offGap);
+    const t = trimToRegions(s, regions, pv, nx, gapTo(pv, i - 1), gapTo(nx, i + 1));
+    if (t) segs.push(t);
+    else ignored.push(s); // keine Stimme erkannt (z. B. von Whisper erfunden unter Musik)
   });
   segs.sort((a, b) => a.start - b.start);
-  if (language === 'de') {
-    const lyrics = findForeignLyrics(segs);
-    ignored.push(...segs.filter((_, i) => lyrics.has(i)));
-    segs = segs.filter((_, i) => !lyrics.has(i));
-  }
   // Pause zwischen zwei Beiträgen: zwischen den zugeschnittenen Abschnittsgrenzen. Bewusst nicht die
   // längste Lücke der reinen Zeitleiste – sie füllt kurze Satzpausen mit Nachhall und Musik auf; der
   // Vergleich mit einem echten Textgerüst passte mit den geschnittenen Grenzen deutlich besser.
@@ -772,9 +769,10 @@ export function buildScriptBlocks(segments, {
     if (last && last.speaker === s.speaker && !offAfter(last, s, gap(last, s))) {
       last.spoken += Math.max(0, s.end - Math.max(s.start, last.end)); // Überlappung nicht doppelt
       last.end = Math.max(last.end, s.end);
+      last.ownEnd = last.end;
       last.texts.push(s.text.trim());
     } else {
-      turns.push({ speaker: s.speaker, start: s.start, end: s.end, spoken: s.end - s.start, texts: [s.text.trim()] });
+      turns.push({ speaker: s.speaker, start: s.start, end: s.end, ownEnd: s.end, spoken: s.end - s.start, texts: [s.text.trim()] });
     }
   }
   if (!turns.length) {
@@ -783,23 +781,28 @@ export function buildScriptBlocks(segments, {
     return blocks;
   }
   const textOf = (t) => t.texts.join(' ');
-  // Lang/kurz an der gesprochenen Zeit (Pausen bis zur OFF-Länge zählen nicht mit)
+  // Lang/kurz an der gesprochenen Zeit: Länge der Abschnitte, ohne die Pausen dazwischen
   const isLong = (t) => t.spoken >= longTurn;
   const isInterjection = (t) => t.spoken < 2 && wordCount(textOf(t)) <= 3;
-  const isQuestion = (t) => /\?["“”»«']?$/.test(t.texts.at(-1) ?? '');
+  const QUESTION = /\?["“”»«']?$/;
+  const isQuestion = (t) => QUESTION.test(t.texts.at(-1) ?? '');
+  const hasQuestion = (t) => t.texts.some((x) => QUESTION.test(x));
 
   // Ein kurzer Einwurf einer anderen Stimme („Ja.“) direkt nach einem langen Beitrag fällt weg –
   // der lange Beitrag bleibt ein OT; spricht dieselbe Person danach weiter, wird es ein OT.
-  // Eine kurze Frage („Und warum?“) ist kein Einwurf: Sie kommt mit ihrer Antwort in ein Sit.
+  // Eine kurze Frage („Und warum?“, auch „Echt? … Mhm.“) ist kein Einwurf: Sie kommt mit ihrer
+  // Antwort in ein Sit.
   for (let k = 1; k < turns.length;) {
     const t = turns[k], p = turns[k - 1];
-    if (isInterjection(t) && !isQuestion(t) && p.speaker !== t.speaker && isLong(p) && !isPause(gap(p, t))) {
+    if (isInterjection(t) && !hasQuestion(t) && p.speaker !== t.speaker && isLong(p) && !isPause(gap(p, t))) {
       turns.splice(k, 1);
       const n = turns[k];
-      // Die Zeit des Einwurfs gehört zum OT (sonst entstünde dort ein falsches OFF)
+      // Die Zeit des Einwurfs gehört zum OT (sonst entstünde dort ein falsches OFF). Ob dieselbe
+      // Person weiterspricht, misst sich aber an ihrer eigenen Pause, als gäbe es den Einwurf nicht.
       p.end = Math.max(p.end, t.end);
-      if (n && n.speaker === p.speaker && !offAfter(p, n, gap(p, n))) {
+      if (n && n.speaker === p.speaker && !offAfter(p, n, n.start - p.ownEnd)) {
         p.end = Math.max(p.end, n.end);
+        p.ownEnd = n.ownEnd;
         p.spoken += n.spoken;
         p.texts.push(...n.texts);
         turns.splice(k, 1);
