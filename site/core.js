@@ -577,35 +577,45 @@ function trimToSpeech(seg, levels, threshold, frameSec = 0.1) {
 
 const wordCount = (text) => text.split(/\s+/).filter(Boolean).length;
 
+// Liegt ein Sprachbereich wirklich im Abschnitt? Whisper-Grenzen liegen oft 0,2–0,5 s daneben:
+// Ein Bereich, der nur knapp hineinragt, gehört zum Nachbarn.
+function regionInSeg([a, b], seg) {
+  const o = Math.min(b, seg.end) - Math.max(a, seg.start);
+  return o > 0.1 && (o >= 0.5 || o >= 0.5 * (b - a));
+}
+
 /**
  * Abschnitt auf die Sprach-Zeitleiste der Sprecher-Erkennung zuschneiden. Sie erkennt Stimmen auch
  * unter Musik oder Geräuschen, wo die Lautstärke allein keine Pause zeigt.
- * Whisper lässt einen Abschnitt oft schon am Ende des vorigen beginnen, auch wenn dazwischen Musik
- * oder Stille liegt. Steckt im Abschnitt eine Pause von mindestens offGap Sekunden und reicht die
- * Sprache danach für seine Wörter, beginnt er erst nach dieser Pause.
+ * Whisper setzt die Grenze zwischen zwei Abschnitten oft an die falsche Stelle: Ein Abschnitt beginnt
+ * schon in der Sprache des vorigen oder reicht bis in die des nächsten, und die Musik-Pause liegt
+ * in ihm. Steckt im Abschnitt eine Pause von mindestens offGap Sekunden, gehört Sprache an seinem
+ * Rand, die ohne Pause in den Nachbar-Abschnitt weiterläuft, zum Nachbarn.
  * @param regions [[start, end], …] nach Zeit sortiert
+ * @param prev, next benachbarte Abschnitte (ungeschnitten) oder null
+ * @returns geschnittener Abschnitt, oder null, wenn darin keine Stimme erkannt wurde
  */
-function trimToRegions(seg, regions, offGap, secPerWord = 0.25) {
-  // Nur Bereiche, die wirklich im Abschnitt liegen (Grenzen von Whisper und Zeitleiste fallen oft zusammen)
-  const ov = regions.filter(([a, b]) => Math.min(b, seg.end) - Math.max(a, seg.start) > 0.1);
-  if (!ov.length) return seg;
-  let start = Math.max(seg.start, ov[0][0]);
-  const end = Math.min(seg.end, ov.at(-1)[1]);
-  const need = wordCount(seg.text) * secPerWord;
-  let after = 0;
-  for (let i = ov.length - 1; i > 0; i--) {
-    after += Math.min(ov[i][1], end) - Math.max(ov[i][0], seg.start);
-    if (ov[i][0] - ov[i - 1][1] >= offGap && after >= need) {
-      start = Math.max(start, ov[i][0]);
-      break;
-    }
+function trimToRegions(seg, regions, offGap, prev = null, next = null) {
+  const ov = regions.filter((r) => regionInSeg(r, seg));
+  if (!ov.length) return null;
+  // Inseln: Sprachbereiche, zwischen denen keine OFF-lange Pause liegt
+  const islands = [[ov[0]]];
+  for (let i = 1; i < ov.length; i++) {
+    if (ov[i][0] - ov[i - 1][1] >= offGap) islands.push([ov[i]]);
+    else islands.at(-1).push(ov[i]);
   }
+  let first = 0, last = islands.length - 1;
+  if (last > first && prev && regionInSeg(islands[first][0], prev)) first++;
+  if (last > first && next && regionInSeg(islands[last].at(-1), next)) last--;
+  const start = Math.max(seg.start, islands[first][0][0]);
+  const end = Math.min(seg.end, islands[last].at(-1)[1]);
   return start < end ? { ...seg, start, end } : seg;
 }
 
 // Englische Wörter, die im Deutschen nicht vorkommen (für Liedtexte in der Musik).
-const EN_ONLY = new Set(`i you me my your the and but of to it it's i'm i'll i've you're it'll we they
-  she he him our this that with for don't can't never over when what know feel heart be is are always
+// „i“ und „is“ fehlen absichtlich: Im bairischen Dialekt heißen sie „ich“ und „ist“.
+const EN_ONLY = new Set(`you me my your the and but of to it it's i'm i'll i've you're it'll we they
+  she he him our this that with for don't can't never over when what know feel heart be are always
   get got`.split(/\s+/).filter(Boolean));
 const DE_ONLY = new Set(`ich du er wir ihr sie der die das den dem und aber nicht ist bin bist sind
   ein eine einen einem mit von zu auf auch ja nein mal schon noch dass es wie wo mir mich dich uns
@@ -656,23 +666,36 @@ export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
  *         Antwort (in Interviews kommen keine Fragen vor) und ein Wechsel der Stimme ohne Pause
  *         zwischen einem langen und einem kurzen Beitrag. Ein kurzer Einwurf („Ja.“) nach einem
  *         langen OT fällt weg, das OT bleibt.
- * Englische Liedtexte in einer deutschen Aufnahme zählen nicht als Sprache.
+ * Ein Sit enthält höchstens einen langen Beitrag.
+ * Englische Liedtexte in einer deutschen Aufnahme und Abschnitte, in denen die Sprecher-Erkennung
+ * keine Stimme hört, zählen nicht als Sprache. Ihr Text steht als Hinweis (`ignored`) am Block,
+ * in dessen Zeit er fällt, damit nichts unbemerkt verloren geht.
  * @param segments [{start, end, text, speaker}] – nur Abschnitte mit Text werden genutzt
  * @param speech Sprach-Zeitleiste der Sprecher-Erkennung [[start, end], …]; misst die Pausen auch unter Musik
  * @param levels Lautstärke je 100 ms (frameLevels); Ersatz, wenn keine Sprach-Zeitleiste da ist
- * @param language Sprache der Aufnahme ('de', 'auto', …); der Liedtext-Filter gilt nur für Deutsch
- * @returns [{ type: 'OFF'|'OT'|'Sit', speakers: number[], start, end, full }]
+ * @param language Sprache der Einstellung ('de', 'auto', …); der Liedtext-Filter gilt nur bei 'de'
+ * @returns [{ type: 'OFF'|'OT'|'Sit', speakers: number[], start, end, full, ignored? }]
  */
 export function buildScriptBlocks(segments, {
   offGap = 2, longTurn = 8, duration = null, levels = null, speech = null, language = 'de', directGap = 0.3,
 } = {}) {
   const threshold = levels?.length ? speechThreshold(levels) : 0;
   const regions = speech?.length ? [...speech].sort((a, b) => a[0] - b[0]) : null;
-  let segs = activeSegments(segments)
-    .map((s) => (regions ? trimToRegions(s, regions, offGap) : levels?.length ? trimToSpeech(s, levels, threshold) : s))
-    .sort((a, b) => a.start - b.start);
-  if (language === 'de' || language === 'auto') {
+  const sorted = activeSegments(segments).sort((a, b) => a.start - b.start);
+  const ignored = []; // Abschnitte, die nicht als Sprache zählen
+  let segs = [];
+  sorted.forEach((s, i) => {
+    if (!regions) segs.push(levels?.length ? trimToSpeech(s, levels, threshold) : s);
+    else {
+      const t = trimToRegions(s, regions, offGap, sorted[i - 1] ?? null, sorted[i + 1] ?? null);
+      if (t) segs.push(t);
+      else ignored.push(s); // keine Stimme erkannt (z. B. von Whisper erfunden unter Musik)
+    }
+  });
+  segs.sort((a, b) => a.start - b.start);
+  if (language === 'de') {
     const lyrics = findForeignLyrics(segs);
+    ignored.push(...segs.filter((_, i) => lyrics.has(i)));
     segs = segs.filter((_, i) => !lyrics.has(i));
   }
   const total = Math.max(duration ?? 0, segs.at(-1)?.end ?? 0);
@@ -691,7 +714,8 @@ export function buildScriptBlocks(segments, {
     }
   }
   if (!turns.length) {
-    if (total >= offGap) off(0, total);
+    if (total >= offGap || ignored.length) off(0, total);
+    attachIgnored(blocks, ignored);
     return blocks;
   }
   const textOf = (t) => t.texts.join(' ');
@@ -743,21 +767,44 @@ export function buildScriptBlocks(segments, {
   if (runs[0][0].start >= offGap) off(0, runs[0][0].start);
   runs.forEach((run, ri) => {
     if (ri > 0) off(runs[ri - 1].at(-1).end, run[0].start);
-    // 3. Zusammengehörige Beiträge bilden ein Sit, alle anderen sind ein eigenes OT
+    // 3. Zusammengehörige Beiträge bilden ein Sit, alle anderen sind ein eigenes OT.
+    //    Ein Sit enthält höchstens einen langen Beitrag; eine kurze Frage davor geht mit zur Antwort.
     let group = [run[0]];
     const flush = () => {
       if (group.length >= 2) sit(group);
-      else ot(group[0]);
+      else if (group.length) ot(group[0]);
     };
     for (let k = 1; k < run.length; k++) {
-      if (together(run[k - 1], run[k])) group.push(run[k]);
-      else { flush(); group = [run[k]]; }
+      const t = run[k];
+      if (!together(run[k - 1], t)) { flush(); group = [t]; continue; }
+      if (isLong(t) && group.some(isLong)) {
+        const carry = group.length > 1 && isQuestion(group.at(-1)) && !isLong(group.at(-1)) ? [group.pop()] : [];
+        flush();
+        group = [...carry, t];
+        continue;
+      }
+      group.push(t);
     }
     flush();
   });
   const lastEnd = runs.at(-1).at(-1).end;
   if (total - lastEnd >= offGap) off(lastEnd, total);
+  attachIgnored(blocks, ignored);
   return blocks;
+}
+
+// Weggelassene Abschnitte als Hinweis an den Block hängen, in dessen Zeit sie liegen (sonst den nächsten).
+function attachIgnored(blocks, ignored) {
+  if (!blocks.length) return;
+  for (const s of [...ignored].sort((a, b) => a.start - b.start)) {
+    const mid = (s.start + s.end) / 2;
+    let best = blocks[0], dist = Infinity;
+    for (const b of blocks) {
+      const d = mid < b.start ? b.start - mid : mid > b.end ? mid - b.end : 0;
+      if (d < dist) { dist = d; best = b; }
+    }
+    best.ignored = best.ignored ? `${best.ignored} ${s.text.trim()}` : s.text.trim();
+  }
 }
 
 // Häufige deutsche Wörter, die als Schlagwort nichts aussagen.

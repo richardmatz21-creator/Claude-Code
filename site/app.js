@@ -253,7 +253,7 @@ function onWorkerMessage(msg) {
       f.result = { segments: msg.segments, removed: msg.removed, speakers: msg.speakers };
       f.levels = msg.levels ?? null; // Lautstärke je 100 ms, für die Pausen im Textgerüst
       f.speech = msg.speech ?? null; // Sprach-Zeitleiste der Sprecher-Erkennung (robust bei Musik)
-      if (msg.debug) f.debug = msg.debug;
+      f.debug = msg.debug ?? null;
       f.elapsed = msg.seconds;
       f.names = [];
       f.unsaved = true;          // Text/Untertitel noch nicht heruntergeladen
@@ -950,6 +950,7 @@ function renderScript(f) {
       <label class="visually-hidden" for="sb-text-${i}">Text von Block ${i + 1}</label>
       <textarea id="sb-text-${i}" data-field="text" rows="2" spellcheck="true" lang="${textLang(f)}"
         placeholder="${b.type === 'OFF' ? 'Sprechertext (optional)' : 'Text'}">${esc(b.text)}</textarea>
+      ${b.ignored ? `<p class="small sblock-ignored">Nicht als Sprache gezählt (Liedtext oder keine Stimme erkannt): „${esc(b.ignored)}“${b.type === 'OFF' ? ' – falls das doch gesprochen ist: Block auf OT oder Sit stellen.' : ''}</p>` : ''}
     </article>`).join('');
   for (const ta of $('script-blocks').querySelectorAll('textarea')) autoSize(ta);
 }
@@ -1424,6 +1425,7 @@ function bind() {
     const i = Number(card.dataset.block);
     const b = f.script.blocks[i];
     b.type = e.target.value;
+    if (b.type !== 'OFF' && !b.full && b.ignored) { b.full = b.ignored; b.ignored = ''; } // weggelassenen Text zurückholen
     if (b.type === 'OT' && !b.name) b.name = blockName(f, b.speakers);
     if (b.type !== 'OFF' && !b.text && b.full) b.text = shortenText(b.full, shortOpts(f));
     f.script.edited = true;
