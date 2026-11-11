@@ -356,6 +356,34 @@ test('Textgerüst: spricht dieselbe Person weiter, gibt es erst ab 8 s Pause ein
     { start: 15, end: 20, text: 'Gleich holen wir sie wieder rein.', speaker: 0 },
   ], { duration: 20, speech: [[0, 6], [10, 20]] });
   assert.deepEqual(zeit.map((b) => b.type), ['OT']);
+  // … auch wenn auf der anderen Seite eine andere Stimme spricht (Schwelle je Seite)
+  const seite = buildScriptBlocks([
+    { start: 0, end: 5, text: 'Die Ziegen sind heute schon draußen.', speaker: 0 },
+    { start: 5, end: 20, text: 'Gleich holen wir sie wieder rein, bevor es regnet.', speaker: 0 },
+    { start: 20.3, end: 23, text: 'Ich helfe dir dabei.', speaker: 1 },
+  ], { duration: 23, speech: [[0, 6], [13.2, 20], [20.3, 23]] });
+  assert.ok(!seite.some((b) => b.type === 'OFF'), JSON.stringify(seite.map((b) => b.type)));
+  // Die Hauptsprache am Ende bleibt, auch wenn sie in eine andere Stimme weiterläuft
+  const haupt = buildScriptBlocks([
+    { start: 0, end: 5, text: 'Wie war der Markt?', speaker: 0 },
+    { start: 5, end: 20, text: 'Der Markt war voll, wir haben fast alle Eier und den ganzen Käse verkauft.', speaker: 1 },
+    { start: 20, end: 24, text: 'Das freut mich sehr.', speaker: 2 },
+  ], { duration: 24, speech: [[0, 5.8], [6.2, 6.9], [12, 21.5], [21.8, 24]] });
+  assert.ok(!haupt.some((b) => b.type === 'OFF'), JSON.stringify(haupt.map((b) => [b.type, b.start, b.end])));
+  // Zwei kurze Abschnitte derselben Person ergeben zusammen einen langen Beitrag; „Ja.“ danach fällt weg
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 5, text: 'Heute backen wir zusammen ein Brot.', speaker: 0 },
+    { start: 5.5, end: 10.5, text: 'Dafür brauchen wir Mehl, Wasser und Salz.', speaker: 0 },
+    { start: 10.7, end: 11.2, text: 'Ja.', speaker: 1 },
+  ], { duration: 11.2 }).map((b) => b.type), ['OT']);
+  // Überlappende Abschnitte zählen nicht doppelt: 7,5 s gesprochen = kurz → Einwurf macht ein Sit
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 4.5, text: 'Heute backen wir zusammen ein Brot.', speaker: 0 },
+    { start: 3, end: 7.5, text: 'Dafür brauchen wir Mehl und Wasser.', speaker: 0 },
+    { start: 7.6, end: 8, text: 'Mhm.', speaker: 1 },
+  ], { duration: 8 }).map((b) => b.type), ['Sit']);
+  // Ein Einwurf erst nach 3 s Pause ist kein Einwurf mehr, sondern ein eigener Block
+  assert.deepEqual(buildScriptBlocks([lang, { ...ja, start: 15, end: 15.5 }], { duration: 15.5 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
   // Ohne Sprecher-Erkennung gilt die gewählte OFF-Länge überall
   const ohne = [
     { start: 0, end: 9, text: 'Am Morgen fahren wir mit dem Traktor raus.', },
@@ -363,6 +391,10 @@ test('Textgerüst: spricht dieselbe Person weiter, gibt es erst ab 8 s Pause ein
   ];
   assert.deepEqual(buildScriptBlocks(ohne, { duration: 20 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
   assert.deepEqual(buildScriptBlocks(ohne, { duration: 20, offGap: 5 }).map((b) => b.type), ['OT']);
+  // … auch bei Sprecher-Angabe null, und null/undefined gemischt ist dieselbe unbekannte Stimme
+  const mitNull = ohne.map((x) => ({ ...x, speaker: null }));
+  assert.deepEqual(buildScriptBlocks(mitNull, { duration: 20 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  assert.deepEqual(buildScriptBlocks([mitNull[0], { ...ohne[1], start: 9.5 }], { duration: 20 }).map((b) => b.type), ['OT']);
 });
 
 test('Textgerüst: lang oder kurz zählt nach gesprochener Zeit, nicht nach Pausen dazwischen', () => {

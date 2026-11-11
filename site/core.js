@@ -593,14 +593,15 @@ const EPS = 1e-6;
  * unter Musik oder Geräuschen, wo die Lautstärke allein keine Pause zeigt.
  * Whisper setzt die Grenze zwischen zwei Abschnitten oft an die falsche Stelle: Ein Abschnitt beginnt
  * schon in der Sprache des vorigen oder reicht bis in die des nächsten, und die Musik-Pause liegt
- * in ihm. Steckt im Abschnitt eine Pause von mindestens offGap Sekunden, gehört Sprache an seinem
+ * in ihm. Steckt im Abschnitt eine lange Pause (prevGap/nextGap je Seite), gehört Sprache an seinem
  * Rand, die ohne Pause in den Nachbar-Abschnitt weiterläuft, zum Nachbarn.
  * @param regions [[start, end], …] nach Zeit sortiert
  * @param prev, next benachbarte Abschnitte (ungeschnitten) oder null
- * @param islandGap Pause, ab der Sprachbereiche getrennte Inseln sind (bei derselben Person länger)
+ * @param prevGap, nextGap Pause, ab der Sprache zum vorigen bzw. nächsten Nachbarn abgetrennt wird
+ *        (spricht dort dieselbe Person, gilt die längere OFF-Schwelle)
  * @returns geschnittener Abschnitt, oder null, wenn darin keine Stimme erkannt wurde
  */
-function trimToRegions(seg, regions, offGap, prev = null, next = null, islandGap = offGap) {
+function trimToRegions(seg, regions, prev = null, next = null, prevGap = 2, nextGap = 2) {
   const ov = regions.filter((r) => regionInSeg(r, seg));
   if (!ov.length) {
     // Ein kurzer Abschnitt, den Whisper etwas verschoben hat: Die Stimme ragt nur teilweise hinein.
@@ -609,22 +610,27 @@ function trimToRegions(seg, regions, offGap, prev = null, next = null, islandGap
     return { ...seg, start: Math.max(seg.start, loose[0][0]), end: Math.min(seg.end, loose.at(-1)[1]) };
   }
   // Inseln: Sprachbereiche, zwischen denen keine OFF-lange Pause liegt
-  const islands = [[ov[0]]];
-  for (let i = 1; i < ov.length; i++) {
-    if (ov[i][0] - ov[i - 1][1] >= islandGap - EPS) islands.push([ov[i]]);
-    else islands.at(-1).push(ov[i]);
-  }
+  const islandsOf = (minGap) => {
+    const isl = [[ov[0]]];
+    for (let i = 1; i < ov.length; i++) {
+      if (ov[i][0] - ov[i - 1][1] >= minGap - EPS) isl.push([ov[i]]);
+      else isl.at(-1).push(ov[i]);
+    }
+    return isl;
+  };
+  const inSeg = (isl) => isl.reduce((n, [a, b]) => n + Math.max(0, Math.min(b, seg.end) - Math.max(a, seg.start)), 0);
+  const mainOf = (isl) => { const sizes = isl.map(inSeg); return sizes.indexOf(Math.max(...sizes)); };
   // Nur bei einer langen Pause im Abschnitt: Sprache am Rand, die auch im Nachbarn liegt, gehört ihm.
   // Die Insel mit der meisten Sprache trägt den Text des Abschnitts und bleibt ganz.
   let lo = 0, hi = ov.length - 1;
-  if (islands.length > 1) {
-    const inSeg = (isl) => isl.reduce((n, [a, b]) => n + Math.max(0, Math.min(b, seg.end) - Math.max(a, seg.start)), 0);
-    const sizes = islands.map(inSeg);
-    const main = sizes.indexOf(Math.max(...sizes));
-    const firstEnd = islands[0].length;                  // Bereiche der ersten Insel: 0 … firstEnd-1
-    const lastStart = ov.length - islands.at(-1).length; // Bereiche der letzten Insel: lastStart …
-    if (main !== 0) while (lo < firstEnd && prev && regionInSeg(ov[lo], prev)) lo++;
-    if (main !== islands.length - 1) while (hi >= lastStart && hi > lo && next && regionInSeg(ov[hi], next)) hi--;
+  const front = islandsOf(prevGap);
+  if (prev && front.length > 1 && mainOf(front) !== 0) {
+    while (lo < front[0].length && regionInSeg(ov[lo], prev)) lo++;
+  }
+  const back = islandsOf(nextGap);
+  if (next && back.length > 1 && mainOf(back) !== back.length - 1) {
+    const lastStart = ov.length - back.at(-1).length; // Bereiche der letzten Insel: lastStart …
+    while (hi >= lastStart && hi > lo && regionInSeg(ov[hi], next)) hi--;
   }
   const start = Math.max(seg.start, ov[lo][0]);
   const end = Math.min(seg.end, ov[hi][1]);
@@ -700,7 +706,7 @@ export function findForeignLyrics(segs, { maxGap = 2 } = {}) {
  *  - OFF: mindestens offGap Sekunden ohne Sprache beim Wechsel der Stimme, bei derselben Person erst
  *         ab max(offGap, offGapSame) Sekunden – eine Person, die kurz absetzt, bleibt ein Block
  *         (dort kommt der Sprechertext hin). Ohne Sprecher-Erkennung gilt überall offGap.
- *  - lang/kurz: gemessen an der gesprochenen Zeit eines Beitrags, ohne seine Pausen
+ *  - lang/kurz: gemessen an der Länge seiner Abschnitte; Pausen zwischen den Abschnitten zählen nicht
  *  - OT:  eine Person spricht länger am Stück (ab longTurn Sekunden) – oder allein
  *  - Sit: Hin und Her von zwei oder mehr Stimmen. Dazu gehören auch eine kurze Frage mit ihrer
  *         Antwort (in Interviews kommen keine Fragen vor) und ein Wechsel der Stimme ohne Pause
@@ -726,20 +732,21 @@ export function buildScriptBlocks(segments, {
   const sameGap = Math.max(offGap, offGapSame);
   const isSamePause = (gap) => gap >= sameGap - EPS;
   // Ohne Sprecher-Erkennung ist unbekannt, ob dieselbe Person weiterspricht: dann gilt offGap
-  const known = (x) => x.speaker !== undefined && x.speaker !== null;
+  const known = (x) => x.speaker !== null;
   const samePerson = (a, b) => known(a) && a.speaker === b.speaker;
   const offAfter = (a, b, g) => (samePerson(a, b) ? isSamePause(g) : isPause(g));
   const threshold = levels?.length ? speechThreshold(levels) : 0;
   const regions = speech?.length ? mergeRegions(speech) : null;
-  const sorted = activeSegments(segments).sort((a, b) => a.start - b.start);
+  // Fehlende Sprecher-Angabe einheitlich als null (undefined und null sind dieselbe „unbekannte“ Stimme)
+  const sorted = activeSegments(segments).map((s) => ({ ...s, speaker: s.speaker ?? null })).sort((a, b) => a.start - b.start);
   const ignored = []; // Abschnitte, die nicht als Sprache zählen
   let segs = [];
   sorted.forEach((s, i) => {
     if (!regions) segs.push(levels?.length ? trimToSpeech(s, levels, threshold) : s);
     else {
       const pv = sorted[i - 1] ?? null, nx = sorted[i + 1] ?? null;
-      const alone = (!pv || samePerson(pv, s)) && (!nx || samePerson(nx, s));
-      const t = trimToRegions(s, regions, offGap, pv, nx, alone ? sameGap : offGap);
+      const gapTo = (nb) => (nb && samePerson(nb, s) ? sameGap : offGap);
+      const t = trimToRegions(s, regions, pv, nx, gapTo(pv), gapTo(nx));
       if (t) segs.push(t);
       else ignored.push(s); // keine Stimme erkannt (z. B. von Whisper erfunden unter Musik)
     }
@@ -763,8 +770,8 @@ export function buildScriptBlocks(segments, {
   for (const s of segs) {
     const last = turns.at(-1);
     if (last && last.speaker === s.speaker && !offAfter(last, s, gap(last, s))) {
+      last.spoken += Math.max(0, s.end - Math.max(s.start, last.end)); // Überlappung nicht doppelt
       last.end = Math.max(last.end, s.end);
-      last.spoken += s.end - s.start;
       last.texts.push(s.text.trim());
     } else {
       turns.push({ speaker: s.speaker, start: s.start, end: s.end, spoken: s.end - s.start, texts: [s.text.trim()] });
