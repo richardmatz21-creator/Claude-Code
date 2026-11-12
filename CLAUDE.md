@@ -45,7 +45,7 @@ Statische Website auf GitHub Pages (`https://richardmatz21-creator.github.io/Cla
 - `coi-serviceworker.min.js` muss im Hauptordner liegen (Mehrkern-WASM braucht COOP/COEP, GitHub Pages setzt keine Header). Erster Besuch lädt einmal neu.
 - Builds in Claude-Cloud-Sessions brauchen `NODE_USE_ENV_PROXY=1`; Hugging Face liefert große Dateien über `us.aws.cdn.hf.co`.
 - Testrechner haben keine fp16-Grafikkarte: automatisch testbar ist nur der Prozessor-Modus.
-- CI (`test.yml`): Den Browser ohne `--with-deps` installieren und nur bei Startproblemen die Systempakete per apt nachladen – fallen die Ubuntu-Paketquellen aus (11.11.2026, stundenlang), hängt `--with-deps` sonst bis zu 20 Minuten und jeder Lauf wird rot, obwohl Code und Tests in Ordnung sind.
+- CI (`test.yml`): Den Browser ohne `--with-deps` installieren (`--only-shell`, die Tests starten nur die Headless Shell), mit Probestart prüfen und nur bei Startproblemen die Systempakete per apt nachladen; der Schritt hat 15 Minuten Zeitgrenze. Grund: Fallen die Ubuntu-Paketquellen aus (11.11.2026, knapp drei Stunden), hängt `--with-deps` bis zu 20 Minuten und jeder Lauf wird rot, obwohl Code und Tests in Ordnung sind.
 
 ## Arbeitsablauf
 - Arbeiten auf einem `claude/…`-Branch, dann Pull Request nach `main`. Gemergt wird nur nach ausdrücklichem OK des Besitzers.
