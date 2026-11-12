@@ -8,6 +8,8 @@ import { zipSync, strToU8 } from './__ASSETS__/vendor/fflate.js';
 
 // Ersetzt der Build durch die Versionskennung.
 const BUILD = '__BUILD__';
+// Analyse-Modus (…/?debug): Rohdaten der Umwandlung für die Auswertung der Textgerüst-Regeln
+const DEBUG = new URLSearchParams(location.search).has('debug');
 
 const $ = (id) => document.getElementById(id);
 const BIG_FILE = 500 * 1024 * 1024;
@@ -32,7 +34,7 @@ const shortOpts = (f) => {
   const { ratio, groupSize, maxGroups } = SCRIPT_LEVELS[f.script.level];
   return { ratio, groupSize, maxGroups, freq: f.script.freq };
 };
-const LONG_TURN = 8; // ab so vielen Sekunden am Stück ist ein Beitrag ein eigenes OT
+const LONG_TURN = 8; // ab so vielen Sekunden Sprache ist ein Beitrag ein eigenes OT
 
 // ---------- Zustand ----------
 
@@ -250,6 +252,8 @@ function onWorkerMessage(msg) {
       for (const seg of msg.segments) seg.orig = seg.text;
       f.result = { segments: msg.segments, removed: msg.removed, speakers: msg.speakers };
       f.levels = msg.levels ?? null; // Lautstärke je 100 ms, für die Pausen im Textgerüst
+      f.speech = msg.speech ?? null; // Sprach-Zeitleiste der Sprecher-Erkennung (robust bei Musik)
+      f.debug = msg.debug ?? null;
       f.elapsed = msg.seconds;
       f.names = [];
       f.unsaved = true;          // Text/Untertitel noch nicht heruntergeladen
@@ -387,6 +391,7 @@ async function processNext() {
     numSpeakers: s.diarize && s.speakers !== 'auto' ? Number(s.speakers) : null,
     mode: state.mode,
     run,
+    debug: DEBUG,
   }, [audio.buffer]);
 }
 
@@ -877,11 +882,13 @@ function blockName(f, speakers) {
 
 function generateScript(f, { keepSettings = false } = {}) {
   const prev = f.script;
-  const offGap = keepSettings && prev ? prev.offGap : 3;
+  const offGap = keepSettings && prev ? prev.offGap : 2;
   const level = keepSettings && prev ? prev.level : 2;
   const title = prev?.title ?? titleFromFileName(f.name);
   const freq = wordFrequencies(activeSegments(f.result.segments).map((s) => s.text));
-  const blocks = buildScriptBlocks(f.result.segments, { offGap, longTurn: LONG_TURN, duration: f.duration, levels: f.levels })
+  const blocks = buildScriptBlocks(f.result.segments, {
+    offGap, longTurn: LONG_TURN, duration: f.duration, levels: f.levels, speech: f.speech, language: f.settings.language,
+  })
     .map((b) => ({
       ...b,
       name: b.type === 'OT' ? blockName(f, b.speakers) : '',
@@ -943,6 +950,7 @@ function renderScript(f) {
       <label class="visually-hidden" for="sb-text-${i}">Text von Block ${i + 1}</label>
       <textarea id="sb-text-${i}" data-field="text" rows="2" spellcheck="true" lang="${textLang(f)}"
         placeholder="${b.type === 'OFF' ? 'Sprechertext (optional)' : 'Text'}">${esc(b.text)}</textarea>
+      ${b.ignored ? `<p class="small sblock-ignored">Nicht als Sprache gezählt (Liedtext oder keine Stimme erkannt): „${esc(b.ignored)}“${b.type === 'OFF' && !b.full ? ' – falls das doch gesprochen ist: Block auf OT oder Sit stellen.' : ''}</p>` : ''}
     </article>`).join('');
   for (const ta of $('script-blocks').querySelectorAll('textarea')) autoSize(ta);
 }
@@ -1417,6 +1425,7 @@ function bind() {
     const i = Number(card.dataset.block);
     const b = f.script.blocks[i];
     b.type = e.target.value;
+    if (b.type !== 'OFF' && !b.full && b.ignored) { b.full = b.ignored; b.ignored = ''; } // weggelassenen Text zurückholen
     if (b.type === 'OT' && !b.name) b.name = blockName(f, b.speakers);
     if (b.type !== 'OFF' && !b.text && b.full) b.text = shortenText(b.full, shortOpts(f));
     f.script.edited = true;
@@ -1537,6 +1546,7 @@ async function init() {
   }
   bind();
   render();
+  if (DEBUG) window.__azt = state;
   state.mode = await detectMode();
   renderModeInfo();
   getWorker();

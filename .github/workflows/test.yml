@@ -31,7 +31,21 @@ jobs:
       - name: Schnelltests
         run: node tests/unit.mjs
       - name: Browser installieren
-        run: npx playwright install --with-deps chromium
+        # Erst nur den Browser holen (kommt von Playwright, nicht von Ubuntu): Das Runner-Abbild bringt
+        # die nötigen Bibliotheken in der Regel mit. Nur wenn er so nicht startet, die Systempakete per
+        # apt nachinstallieren. Grund: Am 11.11.2026 waren die Ubuntu-Paketquellen für GitHub knapp drei
+        # Stunden nicht erreichbar – der alte Schritt hing bis zu 20 Minuten und zehn Läufe in Folge
+        # wurden rot. Geladen wird nur die Headless Shell, die Tests starten keinen vollen Chrome.
+        # Die Zeitgrenze fängt auch den apt-Weg ab, falls die Quellen wieder ausfallen.
+        timeout-minutes: 15
+        run: |
+          npx playwright install --only-shell chromium
+          if node --input-type=module -e "import { chromium } from 'playwright'; const b = await chromium.launch(); await b.close();"; then
+            echo "Browser startet ohne zusätzliche Systempakete."
+          else
+            echo "::warning::Browser startet nicht – installiere die Systempakete per apt nach."
+            npx playwright install-deps chromium
+          fi
       - name: Ende-zu-Ende-Test im Browser
         run: node tests/e2e.mjs --screens screenshots
       - name: Bildschirmfotos aufheben

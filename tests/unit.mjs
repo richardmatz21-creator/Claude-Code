@@ -6,7 +6,7 @@ import {
   splitText, wrapLines, buildCues, toSrt, toTxt, clusterSpeakers, assignSpeakers,
   speakerTimeline, baseName, SAMPLE_RATE, planSpeechChunks, assembleChunk, chunkTimeToSource,
   groupParagraphs, activeSegments, findMatches, countMatches, replaceAll,
-  buildScriptBlocks, shortenText, wordFrequencies, scriptDocxFiles, titleFromFileName,
+  buildScriptBlocks, shortenText, wordFrequencies, scriptDocxFiles, titleFromFileName, findForeignLyrics,
 } from '../site/core.js';
 
 let failed = 0;
@@ -245,10 +245,10 @@ test('Textgerüst: OFF bei Stille, OT bei langen Beiträgen, Sit bei Hin und Her
     { start: 4, end: 10, text: 'Heute zeige ich euch meinen Garten.', speaker: 0 },
     { start: 10.5, end: 16, text: 'Hier wachsen die Tomaten am besten.', speaker: 0 }, // gleiche Stimme → ein OT (12 s)
     { start: 16.5, end: 30, text: 'Ich bin der Ben und zum ersten Mal auf dem Hof.', speaker: 1 }, // direkt danach, lang → eigenes OT
-    { start: 36, end: 38, text: 'Grüß dich!', speaker: 1 },                            // nach 6 s Stille: Hin und Her → Sit
-    { start: 38.2, end: 40, text: 'Hallo, schön dass du da bist.', speaker: 0 },
-    { start: 40.3, end: 42, text: 'Danke, gerne.', speaker: 1 },
-    { start: 43, end: 45, text: 'Komm rein.', speaker: 0 },
+    { start: 36, end: 38, text: 'Grüß dich, Ben!', speaker: 0 },                       // nach 6 s Stille: Hin und Her → Sit
+    { start: 38.2, end: 40, text: 'Hallo, schön hier.', speaker: 1 },
+    { start: 40.3, end: 42, text: 'Komm rein.', speaker: 0 },
+    { start: 43, end: 45, text: 'Danke, gerne.', speaker: 1 },
   ];
   const blocks = buildScriptBlocks(segs, { duration: 52 });
   assert.deepEqual(blocks.map((b) => b.type), ['OFF', 'OT', 'OT', 'OFF', 'Sit', 'OFF']);
@@ -258,7 +258,7 @@ test('Textgerüst: OFF bei Stille, OT bei langen Beiträgen, Sit bei Hin und Her
   assert.deepEqual(blocks[4].speakers.sort(), [0, 1]);
   assert.equal(blocks[0].start, 0);
   assert.equal(blocks.at(-1).end, 52);
-  // OFF-Grenze einstellbar: bei 8 s gibt es zwischen 30 s und 36 s kein OFF mehr (Bens Beiträge verschmelzen)
+  // OFF-Grenze einstellbar: bei 8 s gibt es zwischen 30 s und 36 s kein OFF mehr
   assert.deepEqual(buildScriptBlocks(segs, { duration: 52, offGap: 8 }).map((b) => b.type), ['OT', 'OT', 'Sit']);
   // Leere Abschnitte zählen nicht; ohne Sprache ist alles OFF
   assert.deepEqual(buildScriptBlocks([{ start: 0, end: 2, text: ' ', speaker: 0 }], { duration: 10 }).map((b) => b.type), ['OFF']);
@@ -273,10 +273,10 @@ test('Textgerüst: Pausen werden am Ton gemessen, nicht an den gepolsterten Absc
   for (let f = 0; f < 200; f++) levels[f] = (f < 100 || f >= 138) ? 0.2 : 0.001;
   const segs = [
     { start: 0, end: 10.5, text: 'Erster langer Beitrag über den Hof.', speaker: 0 },
-    { start: 13.3, end: 20, text: 'Zweiter langer Beitrag über die Ernte.', speaker: 0 },
+    { start: 13.3, end: 20, text: 'Zweiter langer Beitrag über die Ernte.', speaker: 1 },
   ];
-  assert.deepEqual(buildScriptBlocks(segs, { duration: 20 }).map((b) => b.type), ['OT']); // ohne Pegel: 2,8 s → kein OFF
-  const blocks = buildScriptBlocks(segs, { duration: 20, levels });
+  assert.deepEqual(buildScriptBlocks(segs, { duration: 20, offGap: 3 }).map((b) => b.type), ['OT', 'OT']); // ohne Pegel: 2,8 s → kein OFF
+  const blocks = buildScriptBlocks(segs, { duration: 20, levels, offGap: 3 });
   assert.deepEqual(blocks.map((b) => b.type), ['OT', 'OFF', 'OT']);
   assert.ok(Math.abs(blocks[1].start - 10) < 0.15 && Math.abs(blocks[1].end - 13.8) < 0.15, JSON.stringify(blocks[1]));
 });
@@ -301,6 +301,26 @@ test('Textgerüst: kurzer Einwurf – nach langem OT fällt er weg, nach kurzem 
     { start: 27.2, end: 47, text: 'Danach fahre ich mit dem Traktor auf das Feld und bleibe dort bis zum Mittagessen.', speaker: 0 },
   ];
   assert.deepEqual(buildScriptBlocks(mehrfach, { duration: 47 }).map((b) => b.type), ['OT']);
+  // Lücke nach einem Einwurf wird ab dem Einwurf gemessen: insgesamt nie 2 s still → ein OT
+  const luecke = [
+    { start: 0, end: 12, text: 'Ich erzähle jetzt ausführlich, wie mein Tag auf dem Hof beginnt.', speaker: 0 },
+    { start: 12.3, end: 12.8, text: 'Ja.', speaker: 1 },
+    { start: 14.3, end: 26, text: 'Zuerst füttere ich die Hühner und dann melke ich die Kühe.', speaker: 0 },
+  ];
+  assert.deepEqual(buildScriptBlocks(luecke, { duration: 26 }).map((b) => b.type), ['OT']);
+  // … auch wenn danach eine dritte Stimme kommt: kein falsches OFF über dem Einwurf
+  const drei = buildScriptBlocks([luecke[0], { start: 13.5, end: 14, text: 'Ja.', speaker: 1 },
+    { start: 15.5, end: 20, text: 'Ich bringe gleich den Kaffee raus.', speaker: 2 }], { duration: 20 });
+  assert.deepEqual(drei.map((b) => [b.type, b.start, b.end]), [['OT', 0, 14], ['OT', 15.5, 20]]);
+  // Eine kurze Frage ist kein Einwurf: Frage und Antwort werden ein Sit
+  const frage = [
+    { start: 0, end: 12, text: 'Ich erzähle jetzt ausführlich, wie mein Tag auf dem Hof beginnt.', speaker: 0 },
+    { start: 12.2, end: 13, text: 'Und warum?', speaker: 1 },
+    { start: 13.3, end: 25, text: 'Weil die Tiere nicht warten können, die wollen pünktlich ihr Futter.', speaker: 0 },
+  ];
+  const bf = buildScriptBlocks(frage, { duration: 25 });
+  assert.deepEqual(bf.map((b) => [b.type, b.start]), [['OT', 0], ['Sit', 12.2]]);
+  assert.match(bf[1].full, /^Und warum\? Weil/);
   const kurz = [
     { start: 0, end: 4, text: 'Hier ist der neue Stall.', speaker: 0 },
     { start: 4.2, end: 5, text: 'Super!', speaker: 1 },
@@ -308,6 +328,429 @@ test('Textgerüst: kurzer Einwurf – nach langem OT fällt er weg, nach kurzem 
   const b2 = buildScriptBlocks(kurz, { duration: 5 });
   assert.deepEqual(b2.map((b) => b.type), ['Sit']);
   assert.match(b2[0].full, /Super!$/);
+});
+
+test('Textgerüst: spricht dieselbe Person weiter, gibt es erst ab 8 s Pause ein OFF', () => {
+  const erst = { start: 0, end: 10, text: 'Ich zeige euch heute unseren Kräutergarten hinter dem Haus.', speaker: 0 };
+  const dann = (start, speaker = 0) => ({ start, end: start + 6, text: 'Hier wachsen Minze, Salbei und ganz viel Schnittlauch.', speaker });
+  assert.deepEqual(buildScriptBlocks([erst, dann(15)], { duration: 21 }).map((b) => b.type), ['OT']);          // 5 s Pause
+  assert.deepEqual(buildScriptBlocks([erst, dann(18.5)], { duration: 24.5 }).map((b) => b.type), ['OT', 'OFF', 'OT']); // 8,5 s
+  assert.deepEqual(buildScriptBlocks([erst, dann(15, 1)], { duration: 21 }).map((b) => b.type), ['OT', 'OFF', 'OT']); // andere Stimme: ab 2 s
+  // Einstellbar; eine größere OFF-Länge gilt auch für dieselbe Person
+  assert.deepEqual(buildScriptBlocks([erst, dann(15)], { duration: 21, offGapSame: 4 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  assert.deepEqual(buildScriptBlocks([erst, dann(18.5)], { duration: 24.5, offGap: 10 }).map((b) => b.type), ['OT']);
+  // Grenze genau bei 8 s
+  assert.deepEqual(buildScriptBlocks([erst, dann(17.9)], { duration: 23.9 }).map((b) => b.type), ['OT']);
+  assert.deepEqual(buildScriptBlocks([erst, dann(18)], { duration: 24 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  // Nach einem weggefallenen Einwurf gilt dieselbe Regel
+  const lang = { start: 0, end: 12, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 };
+  const ja = { start: 12.2, end: 12.7, text: 'Ja.', speaker: 1 };
+  assert.deepEqual(buildScriptBlocks([lang, ja, dann(17.7)], { duration: 23.7 }).map((b) => b.type), ['OT']);
+  assert.deepEqual(buildScriptBlocks([lang, ja, dann(21.2)], { duration: 27.2 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  // Zwei Einwürfe derselben Stimme mit Pause dazwischen bleiben Einwürfe
+  const genau = { start: 15.7, end: 16.2, text: 'Genau.', speaker: 1 };
+  assert.deepEqual(buildScriptBlocks([lang, ja, genau, { ...dann(16.4), end: 28 }], { duration: 28 }).map((b) => b.type), ['OT']);
+  // Zuschneiden auf die Zeitleiste macht bei derselben Person kein OFF aus 4 s Pause
+  const zeit = buildScriptBlocks([
+    { start: 0, end: 15, text: 'Die Ziegen sind heute schon draußen.', speaker: 0 },
+    { start: 15, end: 20, text: 'Gleich holen wir sie wieder rein.', speaker: 0 },
+  ], { duration: 20, speech: [[0, 6], [10, 20]] });
+  assert.deepEqual(zeit.map((b) => b.type), ['OT']);
+  // … auch wenn auf der anderen Seite eine andere Stimme spricht (Schwelle je Seite)
+  const seite = buildScriptBlocks([
+    { start: 0, end: 5, text: 'Die Ziegen sind heute schon draußen.', speaker: 0 },
+    { start: 5, end: 20, text: 'Gleich holen wir sie wieder rein, bevor es regnet.', speaker: 0 },
+    { start: 20.3, end: 23, text: 'Ich helfe dir dabei.', speaker: 1 },
+  ], { duration: 23, speech: [[0, 6], [13.2, 20], [20.3, 23]] });
+  assert.ok(!seite.some((b) => b.type === 'OFF'), JSON.stringify(seite.map((b) => b.type)));
+  // Die Hauptsprache am Ende bleibt, auch wenn sie in eine andere Stimme weiterläuft
+  const haupt = buildScriptBlocks([
+    { start: 0, end: 5, text: 'Wie war der Markt?', speaker: 0 },
+    { start: 5, end: 20, text: 'Der Markt war voll, wir haben fast alle Eier und den ganzen Käse verkauft.', speaker: 1 },
+    { start: 20, end: 24, text: 'Das freut mich sehr.', speaker: 2 },
+  ], { duration: 24, speech: [[0, 5.8], [6.2, 6.9], [12, 21.5], [21.8, 24]] });
+  assert.ok(!haupt.some((b) => b.type === 'OFF'), JSON.stringify(haupt.map((b) => [b.type, b.start, b.end])));
+  // Zwei kurze Abschnitte derselben Person ergeben zusammen einen langen Beitrag; „Ja.“ danach fällt weg
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 5, text: 'Heute backen wir zusammen ein Brot.', speaker: 0 },
+    { start: 5.5, end: 10.5, text: 'Dafür brauchen wir Mehl, Wasser und Salz.', speaker: 0 },
+    { start: 10.7, end: 11.2, text: 'Ja.', speaker: 1 },
+  ], { duration: 11.2 }).map((b) => b.type), ['OT']);
+  // Überlappende Abschnitte zählen nicht doppelt: 7,5 s gesprochen = kurz → Einwurf macht ein Sit
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 4.5, text: 'Heute backen wir zusammen ein Brot.', speaker: 0 },
+    { start: 3, end: 7.5, text: 'Dafür brauchen wir Mehl und Wasser.', speaker: 0 },
+    { start: 7.6, end: 8, text: 'Mhm.', speaker: 1 },
+  ], { duration: 8 }).map((b) => b.type), ['Sit']);
+  // Eine Frage mit „Mhm.“ derselben Stimme danach ist kein Einwurf und geht nicht verloren
+  const echt = buildScriptBlocks([lang, { start: 12.2, end: 12.8, text: 'Echt?', speaker: 1 },
+    { start: 17.8, end: 18.1, text: 'Mhm.', speaker: 1 }, { ...dann(18.5), end: 28 }], { duration: 28 });
+  assert.ok(echt.some((b) => /Echt\?/.test(b.full)), JSON.stringify(echt.map((b) => [b.type, b.full])));
+  // Nach einem weggefallenen Einwurf zählt die eigene Pause der Person: 11,7 s → OFF
+  const eigenePause = buildScriptBlocks([
+    { start: 0, end: 10, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 },
+    { start: 11.9, end: 13.8, text: 'Ja, genau.', speaker: 1 },
+    { start: 21.7, end: 30, text: 'Jetzt kommt die Milch in den großen Kessel.', speaker: 0 },
+  ], { duration: 30 });
+  assert.deepEqual(eigenePause.map((b) => [b.type, b.start]), [['OT', 0], ['OFF', 10], ['OT', 21.7]]); // Einwurf liegt im OFF
+  // … auch wenn beide Teilpausen um den Einwurf kürzer als die OFF-Länge sind
+  const teil = buildScriptBlocks([
+    { start: 0, end: 10, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 },
+    { start: 10.3, end: 10.7, text: 'Ja.', speaker: 1 },
+    { start: 15.5, end: 16.1, text: 'Genau.', speaker: 1 },
+    { start: 18, end: 28, text: 'Jetzt kommt die Milch in den großen Kessel und wird langsam warm.', speaker: 0 },
+  ], { duration: 28 });
+  assert.deepEqual(teil.map((b) => b.type), ['OT', 'OFF', 'OT']);
+  // Eigene Pause zählt ab dem letzten eigenen Abschnitt (auch nach Zusammenfassen)
+  const zweiTeile = buildScriptBlocks([
+    { start: 0, end: 5, text: 'Ich zeige euch heute, wie wir hier den Käse machen.', speaker: 0 },
+    { start: 5.5, end: 12, text: 'Zuerst wird die Milch langsam angewärmt.', speaker: 0 },
+    { start: 12.2, end: 12.7, text: 'Ja.', speaker: 1 },
+    { start: 18, end: 25, text: 'Dann kommt das Lab dazu.', speaker: 0 },
+  ], { duration: 25 });
+  assert.deepEqual(zweiTeile.map((b) => b.type), ['OT']);
+  // Zwei Einwürfe hintereinander, dazwischen spricht A weiter: alles ein OT
+  const doppelt = buildScriptBlocks([
+    { start: 0, end: 12, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 },
+    { start: 12.2, end: 12.6, text: 'Ja.', speaker: 1 },
+    { start: 13, end: 20, text: 'Zuerst wird die Milch langsam angewärmt.', speaker: 0 },
+    { start: 20.2, end: 20.5, text: 'Mhm.', speaker: 1 },
+    { start: 26, end: 30, text: 'Dann kommt das Lab dazu.', speaker: 0 },
+  ], { duration: 30 });
+  assert.deepEqual(doppelt.map((b) => b.type), ['OT']);
+  // Eine Frage mitten im Abschnitt („Wirklich? Ja.“) ist kein Einwurf und geht nicht verloren
+  const mitte = buildScriptBlocks([lang, { start: 12.2, end: 13, text: 'Wirklich? Ja.', speaker: 1 }, { ...dann(13.3), end: 25 }], { duration: 25 });
+  assert.ok(mitte.some((b) => /Wirklich\?/.test(b.full)), JSON.stringify(mitte.map((b) => b.full)));
+  // Ein Einwurf aus zwei Teilen mit langer Pause dazwischen verlängert das OT nicht über die Stille
+  const zweiteilig = buildScriptBlocks([
+    { start: 0, end: 12, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 },
+    { start: 12.2, end: 12.5, text: 'Ja.', speaker: 1 },
+    { start: 19.5, end: 19.8, text: 'Mhm.', speaker: 1 },
+    { start: 20, end: 28, text: 'Ich bringe euch gleich noch ein Stück zum Probieren.', speaker: 2 },
+  ], { duration: 28 });
+  assert.equal(zweiteilig[0].end, 12.5);
+  assert.equal(zweiteilig[1].type, 'OFF');
+  // Ein Einwurf aus drei kurzen Teilen ohne lange Pause: kein falsches OFF
+  const dreiteilig = buildScriptBlocks([
+    { start: 0, end: 12, text: 'Ich zeige euch heute ausführlich, wie wir hier den Käse machen.', speaker: 0 },
+    { start: 12.2, end: 12.5, text: 'Ja.', speaker: 1 },
+    { start: 13.5, end: 13.8, text: 'Mhm.', speaker: 1 },
+    { start: 15, end: 15.3, text: 'Gut.', speaker: 1 },
+    { start: 16, end: 24, text: 'Ich bringe euch gleich noch ein Stück zum Probieren.', speaker: 2 },
+  ], { duration: 24 });
+  assert.ok(!dreiteilig.some((b) => b.type === 'OFF'), JSON.stringify(dreiteilig.map((b) => [b.type, b.start, b.end])));
+  // Endet der Beitrag nicht mit einer Frage, wird er mit einer langen Antwort kein Sit
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 2.5, text: 'Wirklich? Das glaube ich nicht.', speaker: 0 },
+    { start: 3, end: 14, text: 'Doch, wir haben letztes Jahr wirklich über zweihundert Gläser Honig verkauft.', speaker: 1 },
+  ], { duration: 14 }).map((b) => b.type), ['OT', 'OT']);
+  // „…?…“ am Ende ist auch eine Frage
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 2, text: 'Und dann?…', speaker: 0 },
+    { start: 2.8, end: 14, text: 'Dann sind wir mit dem Boot ganz langsam bis zur kleinen Insel in der Mitte gefahren.', speaker: 1 },
+  ], { duration: 14 }).map((b) => b.type), ['Sit']);
+  // „…?!“ am Ende ist eine Frage: mit ihrer Antwort ein Sit
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 2, text: 'Hast du das gesehen?!', speaker: 0 },
+    { start: 2.8, end: 14, text: 'Ja, das war der größte Hirsch, den ich je hier im Wald gesehen habe, wirklich riesig.', speaker: 1 },
+  ], { duration: 14 }).map((b) => b.type), ['Sit']);
+  // Ein Einwurf erst nach 3 s Pause ist kein Einwurf mehr, sondern ein eigener Block
+  assert.deepEqual(buildScriptBlocks([lang, { ...ja, start: 15, end: 15.5 }], { duration: 15.5 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  // Ohne Sprecher-Erkennung gilt die gewählte OFF-Länge überall
+  const ohne = [
+    { start: 0, end: 9, text: 'Am Morgen fahren wir mit dem Traktor raus.', },
+    { start: 12, end: 20, text: 'Dann wird das Heu gewendet.', },
+  ];
+  assert.deepEqual(buildScriptBlocks(ohne, { duration: 20 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  assert.deepEqual(buildScriptBlocks(ohne, { duration: 20, offGap: 5 }).map((b) => b.type), ['OT']);
+  // … auch bei Sprecher-Angabe null, und null/undefined gemischt ist dieselbe unbekannte Stimme
+  const mitNull = ohne.map((x) => ({ ...x, speaker: null }));
+  assert.deepEqual(buildScriptBlocks(mitNull, { duration: 20 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  assert.deepEqual(buildScriptBlocks([mitNull[0], { ...ohne[1], start: 9.5 }], { duration: 20 }).map((b) => b.type), ['OT']);
+});
+
+test('Textgerüst: lang oder kurz zählt nach gesprochener Zeit, nicht nach Pausen dazwischen', () => {
+  // A spricht nur 3 s (mit 5 s Pause dazwischen), B antwortet kurz → kurzes Hin und Her = Sit
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 1.5, text: 'Schau mal da drüben.', speaker: 0 },
+    { start: 6.5, end: 8, text: 'Da steht ein Reh.', speaker: 0 },
+    { start: 8.3, end: 8.8, text: 'Oh ja!', speaker: 1 },
+  ], { duration: 8.8 }).map((b) => b.type), ['Sit']);
+  // A spricht 4 s, B antwortet ohne Pause lang → Wechsel ohne Pause = Sit
+  assert.deepEqual(buildScriptBlocks([
+    { start: 0, end: 2, text: 'Kommst du heute mit?', speaker: 0 },
+    { start: 7, end: 9, text: 'Wir fahren zum See.', speaker: 0 },
+    { start: 9.1, end: 20, text: 'Ja, gern, ich packe nur noch schnell die Badesachen und etwas zu essen ein.', speaker: 1 },
+  ], { duration: 20 }).map((b) => b.type), ['Sit']);
+});
+
+test('Textgerüst: OFF ab 2 Sekunden (Standard), kürzere Pausen bleiben im Block', () => {
+  const segs = [
+    { start: 0, end: 9, text: 'Ich zeige euch heute den Weg hinauf zur Alm.', speaker: 0 },
+    { start: 10.5, end: 19, text: 'Der Weg ist steil, aber oben gibt es frische Milch.', speaker: 0 }, // 1,5 s Pause
+    { start: 21.2, end: 30, text: 'Ich bin die Wirtin und koche hier seit zwanzig Jahren.', speaker: 1 }, // 2,2 s Pause
+  ];
+  assert.deepEqual(buildScriptBlocks(segs, { duration: 30 }).map((b) => b.type), ['OT', 'OFF', 'OT']);
+  assert.equal(buildScriptBlocks(segs, { duration: 30 })[0].end, 19);
+});
+
+test('Textgerüst: Pausen unter Musik zeigt die Sprach-Zeitleiste der Sprecher-Erkennung', () => {
+  // Musik läuft durchgehend (die Lautstärke zeigt keine Pause); gesprochen wird 0–6 s und 14–20 s.
+  const levels = new Float32Array(200).fill(0.2);
+  const speech = [[0, 6], [14, 20]];
+  // Whisper setzt die Grenze zu früh: Abschnitt 2 beginnt noch in der Sprache von Abschnitt 1
+  const frueh = [
+    { start: 0, end: 5, text: 'Die Boote liegen schon im Wasser.', speaker: 0 },
+    { start: 5, end: 20, text: 'Gleich paddeln wir rüber zur kleinen Insel.', speaker: 1 },
+  ];
+  assert.deepEqual(buildScriptBlocks(frueh, { duration: 20, levels }).map((b) => b.type), ['Sit']);
+  const b1 = buildScriptBlocks(frueh, { duration: 20, levels, speech });
+  assert.deepEqual(b1.map((b) => [b.type, b.start, b.end]), [['OT', 0, 5], ['OFF', 5, 14], ['OT', 14, 20]]);
+  // … oder zu spät: Abschnitt 1 reicht bis in die Sprache von Abschnitt 2
+  const spaet = [
+    { start: 0, end: 15, text: 'Die Boote liegen schon im Wasser.', speaker: 0 },
+    { start: 15, end: 20, text: 'Gleich paddeln wir rüber.', speaker: 1 },
+  ];
+  const b2 = buildScriptBlocks(spaet, { duration: 20, levels, speech });
+  assert.deepEqual(b2.map((b) => [b.type, b.start, b.end]), [['OT', 0, 6], ['OFF', 6, 15], ['OT', 15, 20]]);
+  // Ohne Nachbarn bleibt ein Abschnitt mit Pausen ganz (welche Wörter wohin gehören, ist unbekannt)
+  const allein = buildScriptBlocks([{ start: 0, end: 13, text: 'Erst holen wir die Ruder, dann die Westen, und am Ende schieben wir das Boot gemeinsam ins Wasser hinein.', speaker: 0 }],
+    { duration: 13, speech: [[0, 3], [5, 8], [10, 13]] });
+  assert.deepEqual(allein.map((b) => [b.type, b.start, b.end]), [['OT', 0, 13]]);
+  // Am Anfang 8 s nur Musik → das Textgerüst beginnt mit OFF
+  const intro = buildScriptBlocks([{ start: 0, end: 12, text: 'Hallo und herzlich willkommen auf dem Hof.', speaker: 0 }],
+    { duration: 12, speech: [[8, 12]] });
+  assert.deepEqual(intro.map((b) => b.type), ['OFF', 'OT']);
+  assert.equal(intro[1].start, 8);
+});
+
+test('Textgerüst: Sprachbereiche, die nur knapp in einen Abschnitt ragen, zählen nicht', () => {
+  const lang = { start: 0, end: 11, text: 'Den Zaun am Bienenhaus müssen wir vor dem Winter noch einmal komplett streichen.', speaker: 0 };
+  const kurz = { start: 11, end: 15, text: 'Die grüne Farbe liegt schon im Schuppen.', speaker: 1 };
+  // Whisper-Grenzen stoßen lückenlos aneinander, die Zeitleiste zeigt 0,8 s Pause → zwei OT
+  const mitPause = buildScriptBlocks([lang, kurz], { duration: 15, speech: [[0, 11.2], [12, 15]] });
+  assert.deepEqual(mitPause.map((b) => [b.type, b.start]), [['OT', 0], ['OT', 12]]);
+  // Durchgehend gesprochen → Wechsel ohne Pause → Sit
+  assert.deepEqual(buildScriptBlocks([lang, kurz], { duration: 15, speech: [[0, 15]] }).map((b) => b.type), ['Sit']);
+  // Sehr kurze Antwort mitten in durchgehender Sprache zählt (kurzes Hin und Her = Sit)
+  const schnell = buildScriptBlocks([
+    { start: 0, end: 2, text: 'Kommst du mit?', speaker: 0 },
+    { start: 2, end: 2.4, text: 'Nein.', speaker: 1 },
+  ], { duration: 2.4, speech: [[0, 2.4]] });
+  assert.deepEqual(schnell.map((b) => [b.type, b.ignored]), [['Sit', undefined]]);
+  // Ohne lange Pause im Abschnitt wird nichts abgeschnitten, auch wenn Sprache in den Nachbarn reicht
+  const ohnePause = buildScriptBlocks([
+    { start: 0, end: 5, text: 'Schau mal, die Kühe.', speaker: 0 },
+    { start: 5, end: 20, text: 'Die kommen jeden Abend von allein zurück in den Stall, wenn es dunkel wird.', speaker: 1 },
+  ], { duration: 20, speech: [[0, 6], [6.5, 20]] });
+  assert.deepEqual(ohnePause.map((b) => [b.type, b.start]), [['Sit', 0]]);
+  // Nur die Sprache des Nachbarn wird abgeschnitten, eigene Sprache am Rand bleibt
+  const rand = buildScriptBlocks([
+    { start: 0, end: 10, text: 'Hier sieht man den alten Hof von vorne.', speaker: 0 },
+    { start: 10, end: 30, text: 'Das Dach haben wir letztes Jahr neu gedeckt.', speaker: 1 },
+  ], { duration: 30, speech: [[0, 10.5], [11, 14], [25, 30]] });
+  assert.equal(rand.find((b) => b.speakers.includes(1)).start, 11);
+  // Die Hauptsprache eines Abschnitts läuft ohne Pause in den nächsten weiter: kein falsches OFF
+  const weiter = buildScriptBlocks([
+    { start: 0, end: 5, text: 'Wir waren gestern am Markt.', speaker: 0 },
+    { start: 5, end: 20, text: 'Dort gab es frische Erdbeeren und ganz viel Spargel.', speaker: 1 },
+    { start: 20, end: 24, text: 'Und danach sind wir heim.', speaker: 1 },
+  ], { duration: 24, speech: [[0, 5.8], [12, 21.5], [21.8, 24]] });
+  assert.deepEqual(weiter.map((b) => [b.type, b.start, b.end]), [['OT', 0, 5], ['OFF', 5, 12], ['OT', 12, 24]]);
+  // … auch wenn am Anfang ein Rest eigener Sprache übrig bleibt: die Hauptsprache bleibt ganz
+  const rest = buildScriptBlocks([
+    { start: 0, end: 5, text: 'Wir waren gestern am Markt.', speaker: 0 },
+    { start: 5, end: 20, text: 'Dort gab es frische Erdbeeren und ganz viel Spargel.', speaker: 0 },
+    { start: 20, end: 24, text: 'Und danach sind wir heim.', speaker: 0 },
+  ], { duration: 24, speech: [[0, 5.8], [6.2, 6.9], [12, 21.5], [21.8, 24]] });
+  assert.deepEqual(rest.map((b) => [b.type, b.start, b.end]), [['OT', 0, 24]]);
+  // Hauptsprache am Anfang, die aus dem vorigen Abschnitt herüberläuft, bleibt ebenfalls
+  const vorn = buildScriptBlocks([
+    { start: 0, end: 5, text: 'Wie war die Ernte?', speaker: 0 },
+    { start: 5, end: 20, text: 'Die Ernte war dieses Jahr richtig gut, vor allem bei den Äpfeln.', speaker: 1 },
+  ], { duration: 20, speech: [[0, 12], [16, 17]] });
+  assert.deepEqual(vorn.map((b) => [b.type, b.start, b.end]), [['Sit', 0, 17], ['OFF', 17, 20]]);
+  // Kein Sprachbereich, der nur hauchdünn (unter 0,1 s) hineinragt
+  const hauch = buildScriptBlocks([{ start: 5, end: 5.15, text: 'Ja.', speaker: 0 }], { duration: 6, speech: [[0, 5.08]] });
+  assert.equal(hauch[0].ignored, 'Ja.');
+  // Pause genau an der Grenze (Fließkomma: 4,6 − 3,1 = 1,4999…) zählt als OFF
+  const grenze = buildScriptBlocks([
+    { start: 0, end: 3.1, text: 'Erster Satz am Teich.', speaker: 0 },
+    { start: 4.6, end: 8, text: 'Zweiter Satz am Teich.', speaker: 1 },
+  ], { duration: 8, offGap: 1.5 });
+  assert.deepEqual(grenze.map((b) => b.type), ['OT', 'OFF', 'OT']);
+  // Kurze Antwort, die Whisper um mehr als ihre halbe Länge verschoben hat, zählt trotzdem
+  const verschoben = buildScriptBlocks([
+    { start: 0, end: 4, text: 'Kommst du morgen mit zum Markt?', speaker: 0 },
+    { start: 4.5, end: 5.1, text: 'Ja, klar.', speaker: 1 },
+  ], { duration: 5.5, speech: [[0, 4], [4.85, 5.45]] });
+  assert.deepEqual(verschoben.map((b) => [b.type, b.ignored]), [['Sit', undefined]]);
+  // Überlappende Sprachbereiche werden zusammengefasst
+  const ueber = buildScriptBlocks([
+    { start: 0, end: 20, text: 'Heute misten wir den ganzen Stall aus und streuen frisches Stroh ein.', speaker: 0 },
+    { start: 24, end: 30, text: 'Jetzt sind die Ziegen wieder zufrieden.', speaker: 1 },
+  ], { duration: 30, speech: [[0, 20], [5, 6], [24, 30]] });
+  assert.deepEqual(ueber.map((b) => [b.type, b.start, b.end]), [['OT', 0, 20], ['OFF', 20, 24], ['OT', 24, 30]]);
+  // Eigene Sprache am Ende, die nicht im Nachbarn liegt, bleibt
+  const eigen = buildScriptBlocks([
+    { start: 0, end: 14, text: 'Erst kommt der Teig in die Form, dann in den Ofen.', speaker: 0 },
+    { start: 20, end: 25, text: 'Nach einer Stunde ist das Brot fertig.', speaker: 1 },
+  ], { duration: 25, speech: [[0, 8], [12, 13], [20, 25]] });
+  assert.equal(eigen[0].end, 13);
+  // Kleiner eigener Sprachbereich ganz im Abschnitt zählt
+  const blocks = buildScriptBlocks([{ start: 0, end: 4, text: 'Ja.', speaker: 0 }], { duration: 4, speech: [[2.5, 2.8]] });
+  assert.deepEqual(blocks.map((b) => [b.type, b.start, b.end]), [['OFF', 0, 2.5], ['OT', 2.5, 2.8]]);
+});
+
+test('Textgerüst: Abschnitt ohne erkannte Stimme zählt nicht, bleibt aber als Hinweis sichtbar', () => {
+  const segs = [
+    { start: 0, end: 6, text: 'Morgen ernten wir die ersten Kürbisse.', speaker: 0 },
+    { start: 8, end: 11, text: 'Bis zum nächsten Mal.', speaker: 0 }, // nur Musik, Whisper hat das erfunden
+  ];
+  const blocks = buildScriptBlocks(segs, { duration: 14, speech: [[0, 6]] });
+  assert.deepEqual(blocks.map((b) => b.type), ['OT', 'OFF']);
+  assert.equal(blocks[1].ignored, 'Bis zum nächsten Mal.');
+  assert.equal(blocks[0].ignored, undefined);
+  // Ohne Sprach-Zeitleiste bleibt der Abschnitt Sprache
+  const ohneZeit = buildScriptBlocks(segs, { duration: 14 });
+  assert.deepEqual(ohneZeit.map((b) => b.type), ['OT', 'OFF']);
+  assert.match(ohneZeit[0].full, /Bis zum nächsten Mal\.$/);
+  // Nur weggelassener Text: ein OFF über alles, mit Hinweis
+  const nur = buildScriptBlocks([segs[1]], { duration: 1.5, speech: [[20, 21]] });
+  assert.deepEqual(nur.map((b) => [b.type, b.ignored]), [['OFF', 'Bis zum nächsten Mal.']]);
+});
+
+test('Textgerüst: kurze Frage und Antwort sind ein Sit, auch wenn die Antwort lang ist', () => {
+  const segs = [
+    { start: 0, end: 3, text: 'Welches Brot backst du am liebsten?', speaker: 0 },
+    { start: 3.8, end: 20, text: 'Am liebsten Roggenbrot mit Kümmel, das braucht zwar einen Tag Vorlauf, aber der Teig wird dann richtig gut.', speaker: 1 },
+  ];
+  const blocks = buildScriptBlocks(segs, { duration: 20 });
+  assert.deepEqual(blocks.map((b) => b.type), ['Sit']);
+  assert.deepEqual(blocks[0].speakers, [0, 1]);
+  // Anführungszeichen nach dem Fragezeichen
+  const zitiert = segs.map((s, i) => (i === 0 ? { ...s, text: 'Sie fragt: „Welches Brot backst du am liebsten?“' } : s));
+  assert.deepEqual(buildScriptBlocks(zitiert, { duration: 20 }).map((b) => b.type), ['Sit']);
+  // Ohne Fragezeichen bleibt es bei zwei OT
+  const ohne = segs.map((s, i) => (i === 0 ? { ...s, text: 'Erzähl mal vom Backen.' } : s));
+  assert.deepEqual(buildScriptBlocks(ohne, { duration: 20 }).map((b) => b.type), ['OT', 'OT']);
+});
+
+test('Textgerüst: Wechsel der Stimme ohne Pause ist ein Gespräch (Sit), mit Pause zwei OT', () => {
+  const lang = { start: 0, end: 11, text: 'Den Zaun am Bienenhaus müssen wir vor dem Winter noch einmal komplett streichen.', speaker: 0 };
+  const antwort = (start) => ({ start, end: start + 4, text: 'Die grüne Farbe liegt schon im Schuppen.', speaker: 1 });
+  assert.deepEqual(buildScriptBlocks([lang, antwort(11.1)], { duration: 15.1 }).map((b) => b.type), ['Sit']);
+  assert.deepEqual(buildScriptBlocks([lang, antwort(12)], { duration: 16 }).map((b) => b.type), ['OT', 'OT']);
+  // Ein Sit enthält höchstens einen langen Beitrag
+  const lang3 = { start: 15.1, end: 30, text: 'Und danach kommt noch der zweite Anstrich, damit das Holz den Regen gut übersteht.', speaker: 0 };
+  const lsl = buildScriptBlocks([lang, antwort(11), lang3], { duration: 30 });
+  assert.deepEqual(lsl.map((b) => [b.type, b.start]), [['Sit', 0], ['OT', 15.1]]);
+  // … eine kurze Frage dazwischen geht mit zur Antwort
+  const frage = { start: 11, end: 15, text: 'Und wie lange trocknet das dann?', speaker: 1 };
+  const lql = buildScriptBlocks([lang, frage, lang3], { duration: 30 });
+  assert.deepEqual(lql.map((b) => [b.type, b.start]), [['OT', 0], ['Sit', 11]]);
+  // Zwei lange Beiträge direkt hintereinander bleiben zwei OT
+  const lang2 = { start: 11.1, end: 21, text: 'Dafür brauchen wir zwei Leitern, drei Pinsel und am besten einen trockenen Samstag.', speaker: 1 };
+  assert.deepEqual(buildScriptBlocks([lang, lang2], { duration: 21 }).map((b) => b.type), ['OT', 'OT']);
+});
+
+test('Textgerüst: englischer Liedtext in der Musik zählt nicht als Sprache', () => {
+  const segs = [
+    { start: 0, end: 8, text: 'Heute Abend grillen wir hinten im Garten.', speaker: 0 },
+    // frei erfundene Liedzeilen (Whisper hört den Anfang oft halb deutsch)
+    { start: 12, end: 15, text: 'Komm mit mir, I see the morning light', speaker: 1 },
+    { start: 15, end: 18, text: 'And we keep running to the river', speaker: 1 },
+    { start: 18, end: 21, text: 'They will never know my name', speaker: 0 },
+    { start: 26, end: 32, text: 'Das Grillen war richtig gut, alle sind satt geworden.', speaker: 0 },
+  ];
+  assert.deepEqual([...findForeignLyrics(segs)], [1, 2, 3]);
+  const blocks = buildScriptBlocks(segs, { duration: 32 });
+  assert.deepEqual(blocks.map((b) => b.type), ['OT', 'OFF', 'OT']);
+  assert.ok(!blocks.some((b) => /river/.test(b.full)));
+  assert.match(blocks[1].ignored, /^Komm mit mir.*my name$/); // weggelassen, aber sichtbar
+  // Nur bei eingestelltem Deutsch: bei „automatisch“ kann die Aufnahme jede Sprache haben
+  assert.ok(buildScriptBlocks(segs, { duration: 32, language: 'auto' }).some((b) => /river/.test(b.full)));
+  // Liedtext, den die Sprecher-Erkennung der nächsten Person zuordnet, verhindert das OFF nicht
+  const zugeordnet = buildScriptBlocks([
+    { start: 0, end: 9.9, text: 'Am Nachmittag haben wir die ganzen Kartoffeln auf dem Acker geerntet.', speaker: 1 },
+    { start: 10, end: 10.8, text: 'You and me forever', speaker: 0 },
+    { start: 10.8, end: 11.5, text: 'Never let me go', speaker: 0 },
+    { start: 11.5, end: 25, text: 'Danach haben wir alle zusammen im Hof gesessen und noch lange über den Tag geredet.', speaker: 0 },
+  ], { duration: 25, speech: [[0, 9.9], [10, 12], [15, 25]] });
+  assert.deepEqual(zugeordnet.map((b) => b.type), ['OT', 'OFF', 'OT']);
+  // Ein deutscher Satz, der erst 3,4 s nach dem Gesang beginnt, ist kein Liedtext (Abstand an der Zeitleiste)
+  const danach = buildScriptBlocks([
+    { start: 0, end: 8, text: 'Heute Abend grillen wir hinten im Garten mit der ganzen Familie.', speaker: 0 },
+    { start: 10, end: 12, text: 'And we keep running to the river', speaker: 1 },
+    { start: 12, end: 14, text: 'They will never know my name', speaker: 1 },
+    { start: 14, end: 20, text: 'Das Lied ist von The Beatles.', speaker: 0 },
+  ], { duration: 20, speech: [[0, 8], [10, 14], [17.4, 20]] });
+  assert.ok(danach.some((b) => b.type !== 'OFF' && /Beatles/.test(b.full)), JSON.stringify(danach.map((b) => [b.type, b.full])));
+  // Ein Abschnitt ohne Stimme macht aus einem einzelnen englischen Zitat kein Lied
+  const zitatNeben = buildScriptBlocks([
+    { start: 0, end: 10, text: 'Am Nachmittag haben wir die ganzen Kartoffeln auf dem Acker geerntet.', speaker: 0 },
+    { start: 10, end: 12, text: 'And this is what we get', speaker: 1 },
+    { start: 12.5, end: 14, text: 'You never know what you get.', speaker: 1 },
+    { start: 15, end: 25, text: 'Das hat unser Nachbar immer gesagt, wenn das Wetter wieder umgeschlagen ist.', speaker: 0 },
+  ], { duration: 25, speech: [[0, 10], [12.5, 14], [15, 25]] });
+  assert.ok(zitatNeben.some((b) => b.type !== 'OFF' && /You never know/.test(b.full)), JSON.stringify(zitatNeben.map((b) => [b.type, b.full])));
+  // Dasselbe, wenn die Sprecher-Erkennung dem Lied dieselbe Stimme gibt wie dem Satz davor bzw. danach
+  const gleich = buildScriptBlocks([
+    { start: 0, end: 6, text: 'Jetzt kommt das Lied von The Beatles.', speaker: 0 },
+    { start: 6, end: 8, text: 'And we keep running to the river', speaker: 0 },
+    { start: 8, end: 10, text: 'They will never know my name', speaker: 0 },
+    { start: 14, end: 22, text: 'Danach haben wir noch lange zusammen am Feuer gesessen und geredet.', speaker: 1 },
+  ], { duration: 22, speech: [[0, 2.6], [5.4, 10], [14, 22]] });
+  assert.deepEqual(gleich.map((b) => [b.type, b.start, b.end]), [['OT', 0, 2.6], ['OFF', 2.6, 14], ['OT', 14, 22]]);
+  const gleichDanach = buildScriptBlocks([
+    { start: 0, end: 8, text: 'Heute Abend grillen wir hinten im Garten mit der ganzen Familie.', speaker: 1 },
+    { start: 10, end: 12, text: 'And we keep running to the river', speaker: 0 },
+    { start: 12, end: 14, text: 'They will never know my name', speaker: 0 },
+    { start: 14, end: 20, text: 'Das Lied ist von The Beatles.', speaker: 0 },
+  ], { duration: 20, speech: [[0, 8], [10, 14.6], [17.4, 20]] });
+  assert.ok(gleichDanach.some((b) => b.type !== 'OFF' && /Beatles/.test(b.full)), JSON.stringify(gleichDanach.map((b) => [b.type, b.full])));
+  // Bei englischer Aufnahme bleibt alles
+  assert.ok(buildScriptBlocks(segs, { duration: 32, language: 'en' }).some((b) => /river/.test(b.full)));
+  // Ein einzelner englischer Satz (Zitat) bleibt
+  const zitat = [segs[0], { start: 8.5, end: 10, text: 'You never know what you get.', speaker: 0 },
+    { start: 10.2, end: 14, text: 'Das hat meine Tante immer gesagt.', speaker: 0 }];
+  assert.equal(findForeignLyrics(zitat).size, 0);
+  // … auch wenn danach ein Satz im Dialekt folgt
+  assert.equal(findForeignLyrics([...zitat, { start: 14.5, end: 16, text: 'Das is echt so gewesen.', speaker: 0 }]).size, 0);
+  // Englischer Liedtitel im deutschen Satz ist kein Liedtext
+  const titel = [
+    { start: 0, end: 3, text: 'Als Erstes spielt die Kapelle Over the Rainbow.', speaker: 0 },
+    { start: 3.2, end: 6, text: 'Danach kommt noch Stand by Me.', speaker: 0 },
+    { start: 6.5, end: 12, text: 'Und dann tanzen wir alle zusammen im Saal.', speaker: 0 },
+  ];
+  assert.equal(findForeignLyrics(titel).size, 0);
+  // Bairisch („i“ = ich, „is“ = ist) ist kein Englisch
+  const dialekt = [
+    { start: 0, end: 3, text: 'I glaub, des is a Wahnsinn.', speaker: 0 },
+    { start: 3.2, end: 6, text: 'Und des is a so gwesn, wia i des gsagt hab.', speaker: 0 },
+    { start: 6.5, end: 10, text: 'Mia ham des Heu scho eina.', speaker: 1 },
+  ];
+  assert.equal(findForeignLyrics(dialekt).size, 0);
+  assert.equal(findForeignLyrics([
+    { start: 0, end: 3, text: 'I moan, i hob des scho gsagt.', speaker: 0 },
+    { start: 3.2, end: 6, text: 'I hob recht, i woaß des.', speaker: 0 },
+    { start: 6.5, end: 18, text: 'Dann sind wir alle zusammen heimgegangen, haben noch gegessen, den Hund gefüttert und dann den Abend gemütlich ausklingen lassen.', speaker: 1 },
+  ]).size, 0);
+  // Englisches Zitat + langer deutscher Satz mit einem englischen Ausdruck: beides bleibt Sprache
+  assert.equal(findForeignLyrics([
+    { start: 0, end: 3, text: 'Thank you so much for everything!', speaker: 0 },
+    { start: 3.2, end: 13, text: 'Das hat der Verkäufer zu uns gesagt, oh my God, der hat sich richtig gefreut über unseren Besuch.', speaker: 0 },
+    { start: 14, end: 20, text: 'Danach sind wir noch zum Bäcker gegangen.', speaker: 0 },
+  ]).size, 0);
+  // Lied aus zwei Zeilen + langer deutscher Satz mit einem englischen Wort danach: nur das Lied fällt weg
+  assert.deepEqual([...findForeignLyrics([
+    { start: 0, end: 3, text: 'And we keep running to the river', speaker: 0 },
+    { start: 3, end: 6, text: 'They will never know my name', speaker: 0 },
+    { start: 6.5, end: 16, text: 'Das Lied lief auf der Feier, und am Ende haben alle laut mitgesungen, das war echt so ein Moment, you know, für uns.', speaker: 1 },
+    { start: 17, end: 24, text: 'Danach haben wir noch lange zusammen gesessen und geredet.', speaker: 1 },
+  ])], [0, 1]);
+  // Überwiegend englische Aufnahme: nichts entfernen
+  assert.equal(findForeignLyrics(segs.slice(1, 4)).size, 0);
 });
 
 test('Kürzen: erste 3 … Schlagwörter … letzte 3, kurze Texte bleiben ganz', () => {
@@ -391,6 +834,27 @@ test('clusterSpeakers trennt zwei Stimmen und hält feste Anzahl ein', () => {
   assert.deepEqual(clusterSpeakers(embs), [0, 1, 0, 1, 0]);
   assert.deepEqual(clusterSpeakers(embs, { numSpeakers: 1 }), [0, 0, 0, 0, 0]);
   assert.equal(new Set(clusterSpeakers(embs, { numSpeakers: 3 })).size, 3);
+});
+
+test('clusterSpeakers: kurze Stimm-Schnipsel werden keine eigene Person', () => {
+  const embs = [
+    Float32Array.from([1, 0, 0]), Float32Array.from([0.95, 0.1, 0]), // Person A, 12 s
+    Float32Array.from([0, 1, 0]), Float32Array.from([0.1, 0.95, 0]), // Person B, 12 s
+    Float32Array.from([0.3, 0.1, 1]),                                 // 1 s Schnipsel, am ähnlichsten zu A
+  ];
+  const weights = [6, 6, 6, 6, 1];
+  assert.deepEqual(clusterSpeakers(embs, { weights, threshold: 0.4 }), [0, 0, 1, 1, 2]);
+  assert.deepEqual(clusterSpeakers(embs, { weights, threshold: 0.4, minWeight: 2 }), [0, 0, 1, 1, 0]);
+  // … zur ähnlichsten großen Gruppe, nicht einfach zur ersten
+  const zuB = [...embs.slice(0, 4), Float32Array.from([0.05, 0.4, 1])];
+  assert.deepEqual(clusterSpeakers(zuB, { weights, threshold: 0.4, minWeight: 2 }), [0, 0, 1, 1, 1]);
+  // Genau 2 s Gewicht reichen für eine eigene Person
+  assert.deepEqual(clusterSpeakers(embs, { weights: [6, 6, 6, 6, 2], threshold: 0.4, minWeight: 2 }), [0, 0, 1, 1, 2]);
+  // Lange eigene Stimme bleibt eine eigene Person
+  const lang = [...weights.slice(0, 4), 5];
+  assert.deepEqual(clusterSpeakers(embs, { weights: lang, threshold: 0.4, minWeight: 2 }), [0, 0, 1, 1, 2]);
+  // Feste Anzahl: Mindestgewicht spielt keine Rolle
+  assert.equal(new Set(clusterSpeakers(embs, { weights, numSpeakers: 3, minWeight: 2 })).size, 3);
 });
 
 test('assignSpeakers nimmt größte Überlappung', () => {
